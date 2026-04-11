@@ -218,7 +218,7 @@ class TLBSetAssociative : public TLBIndexingPolicy
     std::vector<ReplaceableEntry*>
     getPossibleEntries(const KeyType &key) const override
     {
-        Addr set_number = (key.va >> key.pageSize) & setMask;
+        Addr set_number = ((key.va >> key.pageSize)) & setMask;
         return sets[set_number];
     }
 
@@ -250,6 +250,9 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     Addr size;              // Size of this entry, == Type of TLB Rec
     Addr vpn;               // Virtual Page Number
     uint64_t attributes;    // Memory attributes formatted for PAR
+
+    uint8_t
+        coalLength; // FA: Number of contiguous entries coalesced into this one
 
     LookupLevel lookupLevel;    // Lookup level where the descriptor was fetched
                                 // from.  Used to set the FSR for faults
@@ -303,22 +306,40 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     bool xs;                // xs attribute from FEAT_XS
 
     //Construct an entry that maps to physical address addr for SE mode
-    TlbEntry(Addr _asn, Addr _vaddr, Addr _paddr,
-             bool uncacheable, bool read_only) :
-         pfn(_paddr >> PageShift), size(PageBytes - 1), vpn(_vaddr >> PageShift),
-         attributes(0), lookupLevel(LookupLevel::L1),
-         asid(_asn), vmid(0), tg(Grain4KB), N(0),
-         innerAttrs(0), outerAttrs(0), ap(read_only ? 0x3 : 0), hap(0x3),
-         piindex(0),
-         domain(DomainType::Client),  mtype(MemoryType::StronglyOrdered),
-         longDescFormat(false), global(false), valid(true),
-         ns(true), ss(SecurityState::NonSecure),
-         ipaSpace(PASpace::NonSecure),
-         regime(TranslationRegime::EL10),
-         type(TypeTLB::unified), partial(false),
-         nonCacheable(uncacheable),
-         shareable(false), outerShareable(false), xn(0), pxn(0),
-         xs(true)
+    TlbEntry(Addr _asn, Addr _vaddr, Addr _paddr, bool uncacheable,
+             bool read_only)
+        : pfn(_paddr >> PageShift),
+          size(PageBytes - 1),
+          vpn(_vaddr >> PageShift),
+          attributes(0),
+          coalLength(1),
+          lookupLevel(LookupLevel::L1),
+          asid(_asn),
+          vmid(0),
+          tg(Grain4KB),
+          N(0),
+          innerAttrs(0),
+          outerAttrs(0),
+          ap(read_only ? 0x3 : 0),
+          hap(0x3),
+          piindex(0),
+          domain(DomainType::Client),
+          mtype(MemoryType::StronglyOrdered),
+          longDescFormat(false),
+          global(false),
+          valid(true),
+          ns(true),
+          ss(SecurityState::NonSecure),
+          ipaSpace(PASpace::NonSecure),
+          regime(TranslationRegime::EL10),
+          type(TypeTLB::unified),
+          partial(false),
+          nonCacheable(uncacheable),
+          shareable(false),
+          outerShareable(false),
+          xn(0),
+          pxn(0),
+          xs(true)
     {
         // no restrictions by default, hap = 0x3
 
@@ -327,18 +348,39 @@ struct TlbEntry : public ReplaceableEntry, Serializable
             warn("ARM TlbEntry does not support read-only mappings\n");
     }
 
-    TlbEntry() :
-         pfn(0), size(0), vpn(0), attributes(0), lookupLevel(LookupLevel::L1),
-         asid(0), vmid(0), tg(ReservedGrain), N(0),
-         innerAttrs(0), outerAttrs(0), ap(0), hap(0x3), piindex(0),
-         domain(DomainType::Client), mtype(MemoryType::StronglyOrdered),
-         longDescFormat(false), global(false), valid(false),
-         ns(true), ss(SecurityState::NonSecure),
-         ipaSpace(PASpace::NonSecure),
-         regime(TranslationRegime::EL10),
-         type(TypeTLB::unified), partial(false), nonCacheable(false),
-         shareable(false), outerShareable(false), xn(0), pxn(0),
-         xs(true)
+    TlbEntry()
+        : pfn(0),
+          size(0),
+          vpn(0),
+          attributes(0),
+          coalLength(1),
+          lookupLevel(LookupLevel::L1),
+          asid(0),
+          vmid(0),
+          tg(ReservedGrain),
+          N(0),
+          innerAttrs(0),
+          outerAttrs(0),
+          ap(0),
+          hap(0x3),
+          piindex(0),
+          domain(DomainType::Client),
+          mtype(MemoryType::StronglyOrdered),
+          longDescFormat(false),
+          global(false),
+          valid(false),
+          ns(true),
+          ss(SecurityState::NonSecure),
+          ipaSpace(PASpace::NonSecure),
+          regime(TranslationRegime::EL10),
+          type(TypeTLB::unified),
+          partial(false),
+          nonCacheable(false),
+          shareable(false),
+          outerShareable(false),
+          xn(0),
+          pxn(0),
+          xs(true)
     {
         // no restrictions by default, hap = 0x3
 
@@ -358,6 +400,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         std::swap(size, rhs.size);
         std::swap(vpn, rhs.vpn);
         std::swap(attributes, rhs.attributes);
+        std::swap(coalLength, rhs.coalLength);
         std::swap(lookupLevel, rhs.lookupLevel);
         std::swap(asid, rhs.asid);
         std::swap(vmid, rhs.vmid);
@@ -414,14 +457,15 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     bool
     matchAddress(const KeyType &key) const
     {
+
         Addr page_addr = vpn << N;
+        Addr page_end = (vpn + coalLength) << N;
         if (key.size) {
             // This is a range based loookup
-            return key.va <= page_addr + size &&
-                   key.va + key.size > page_addr;
+            return key.va < page_end && key.va + key.size > page_addr;
         } else {
             // This is a normal lookup
-            return key.va >= page_addr && key.va <= page_addr + size;
+            return key.va >= page_addr && key.va < page_end;
         }
     }
 
@@ -452,7 +496,11 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     Addr
     pAddr(Addr va) const
     {
-        return (pfn << N) | (va & size);
+        Addr req_vpn = va >> N;
+        assert(req_vpn >= vpn);
+        assert(req_vpn < vpn + coalLength);
+        Addr offset = (va >> N) - vpn;
+        return ((pfn + offset) << N) | (va & size);
     }
 
     void
@@ -507,10 +555,11 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     std::string
     print() const override
     {
-        return csprintf("%#x, asn %d vmn %d ppn %#x size: %#x ap:%d "
-                        "ns:%d ss:%s g:%d xs: %d regime:%s", vpn << N, asid, vmid,
-                        pfn << N, size, ap, ns, ss, global,
-                        xs, regimeToStr(regime));
+        return csprintf(
+            "%#x, asn %d vmn %d ppn %#x size: %#x coallength:%d ap:%d "
+            "ns:%d ss:%s g:%d xs: %d regime:%s",
+            vpn << N, asid, vmid, pfn << N, size, coalLength, ap, ns, ss,
+            global, xs, regimeToStr(regime));
     }
 
     void
@@ -536,6 +585,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         SERIALIZE_SCALAR(shareable);
         SERIALIZE_SCALAR(outerShareable);
         SERIALIZE_SCALAR(attributes);
+        SERIALIZE_SCALAR(coalLength);
         SERIALIZE_SCALAR(xn);
         SERIALIZE_SCALAR(pxn);
         SERIALIZE_SCALAR(ap);
@@ -566,6 +616,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         UNSERIALIZE_SCALAR(shareable);
         UNSERIALIZE_SCALAR(outerShareable);
         UNSERIALIZE_SCALAR(attributes);
+        UNSERIALIZE_SCALAR(coalLength);
         UNSERIALIZE_SCALAR(xn);
         UNSERIALIZE_SCALAR(pxn);
         UNSERIALIZE_SCALAR(ap);

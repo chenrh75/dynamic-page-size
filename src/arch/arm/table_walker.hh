@@ -898,6 +898,9 @@ class TableWalker : public ClockedObject
         /** The virtual address that is being translated */
         Addr vaddr_tainted;
 
+        // Current descriptor
+        Addr descAddr;
+
         /** Cached copy of the sctlr as it existed when translation began */
         SCTLR sctlr;
 

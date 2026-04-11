@@ -298,6 +298,7 @@ class TLB : public BaseTLB
      * @param in_host if hcr.e2h == 1 and hcr.tge == 1 for VHE.
      * @param entry_type type of entry to flush (instruction/data/unified)
      */
+
     void _flushMva(Addr mva, uint64_t asn, bool secure_lookup,
                    bool ignore_asn, ExceptionLevel target_el,
                    bool in_host, TypeTLB entry_type);
