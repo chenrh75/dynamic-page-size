@@ -83,6 +83,14 @@ class ArmTLB(BaseTLB):
         LRURP(), "Replacement policy of the TLB"
     )
     is_stage2 = Param.Bool(False, "Is this a stage 2 TLB?")
+    colt_fa = Param.Bool(
+        False,
+        "Enable CoLT-FA style coalescing of adjacent leaf translations",
+    )
+    colt_max_coalesced = Param.Unsigned(
+        16,
+        "Maximum number of base-page translations held in one coalesced TLB entry",
+    )
 
     partial_levels = VectorParam.ArmLookupLevel(
         [],

@@ -40,6 +40,7 @@
 
 #include "arch/arm/tlb.hh"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -102,7 +103,13 @@ TLB::TLB(const ArmTLBParams &p)
     : BaseTLB(p),
       table(name().c_str(), p.size, p.assoc,
             p.replacement_policy, p.indexing_policy),
+      superTable(csprintf("%s.super", name()), p.size, p.assoc,
+            p.replacement_policy, p.indexing_policy),
       size(p.size),
+      coltFA(p.colt_fa),
+      maxCoalescedEntries(
+          std::min<unsigned>(p.colt_max_coalesced,
+                             TlbEntry::MaxCoalescedEntries)),
       isStage2(p.is_stage2),
       _walkCache(false),
       tableWalker(nullptr),
@@ -244,6 +251,18 @@ TLB::checkPromotion(TlbEntry *entry, BaseMMU::Mode mode)
 void
 TLB::insert(const Lookup &lookup_data, TlbEntry &entry)
 {
+    if (tryCoalesce(lookup_data, entry)) {
+        observedPageSizes.insert(entry.N);
+        stats.inserts++;
+
+        if (lookup_data.mode == BaseMMU::Execute) {
+            ppInstRefills->notify(1);
+        } else {
+            ppDataRefills->notify(1);
+        }
+        return;
+    }
+
     TlbEntry *victim = table.findVictim(lookup_data);
 
     *victim = entry;
@@ -260,6 +279,135 @@ TLB::insert(const Lookup &lookup_data, TlbEntry &entry)
     } else {
         ppDataRefills->notify(1);
     }
+}
+
+bool
+TLB::canCoalesce(const TlbEntry &lhs, const TlbEntry &rhs) const
+{
+    if (!coltFA || lhs.partial || rhs.partial || !lhs.valid || !rhs.valid) {
+        return false;
+    }
+
+    return lhs.N == rhs.N &&
+           lhs.lookupLevel == rhs.lookupLevel &&
+           lhs.asid == rhs.asid &&
+           lhs.vmid == rhs.vmid &&
+           lhs.tg == rhs.tg &&
+           lhs.innerAttrs == rhs.innerAttrs &&
+           lhs.outerAttrs == rhs.outerAttrs &&
+           lhs.ap == rhs.ap &&
+           lhs.hap == rhs.hap &&
+           lhs.piindex == rhs.piindex &&
+           lhs.domain == rhs.domain &&
+           lhs.mtype == rhs.mtype &&
+           lhs.longDescFormat == rhs.longDescFormat &&
+           lhs.global == rhs.global &&
+           lhs.ns == rhs.ns &&
+           lhs.ss == rhs.ss &&
+           lhs.ipaSpace == rhs.ipaSpace &&
+           lhs.regime == rhs.regime &&
+           lhs.type == rhs.type &&
+           lhs.partial == rhs.partial &&
+           lhs.nonCacheable == rhs.nonCacheable &&
+           lhs.shareable == rhs.shareable &&
+           lhs.outerShareable == rhs.outerShareable &&
+           lhs.xn == rhs.xn &&
+           lhs.pxn == rhs.pxn &&
+           lhs.xs == rhs.xs;
+}
+
+void
+TLB::mergeCoalesced(TlbEntry &dst, const TlbEntry &src)
+{
+    const bool prepend = src.vpn < dst.vpn;
+    const Addr new_base_vpn = std::min(dst.vpn, src.vpn);
+    const Addr new_base_pfn = std::min(dst.pfn, src.pfn);
+    const auto new_length = std::max(dst.vpn + dst.coalLength,
+                                     src.vpn + src.coalLength) - new_base_vpn;
+
+    const uint8_t dst_shift = dst.vpn - new_base_vpn;
+    const uint8_t src_shift = src.vpn - new_base_vpn;
+    const uint64_t merged_mask =
+        (dst.validMask() << dst_shift) | (src.validMask() << src_shift);
+
+    dst.vpn = new_base_vpn;
+    dst.pfn = new_base_pfn;
+    dst.coalLength = new_length;
+    dst.validSubentries = merged_mask;
+    dst.valid = dst.hasValidSubentries();
+
+    if (prepend) {
+        table.invalidatePrev();
+    }
+}
+
+bool
+TLB::tryCoalesce(const Lookup &lookup_data, TlbEntry &entry)
+{
+    (void)lookup_data;
+
+    if (!coltFA || entry.partial || !entry.valid || maxCoalescedEntries <= 1) {
+        return false;
+    }
+
+    entry.coalLength = std::max<uint8_t>(entry.coalLength, 1);
+    entry.validSubentries = entry.validMask() ? entry.validMask() : 1;
+
+    for (auto &candidate : table) {
+        if (!canCoalesce(candidate, entry)) {
+            continue;
+        }
+
+        if (candidate.vpn <= entry.vpn &&
+            entry.vpn < candidate.vpn + candidate.coalLength &&
+            candidate.pfn + (entry.vpn - candidate.vpn) == entry.pfn) {
+            candidate.validSubentries |=
+                1ULL << static_cast<uint8_t>(entry.vpn - candidate.vpn);
+            candidate.valid = candidate.hasValidSubentries();
+            table.accessEntry(&candidate);
+            return true;
+        }
+    }
+
+    bool progress = false;
+    do {
+        progress = false;
+
+        for (auto &candidate : table) {
+            if (!canCoalesce(candidate, entry)) {
+                continue;
+            }
+
+            const bool append =
+                entry.vpn + entry.coalLength == candidate.vpn &&
+                entry.pfn + entry.coalLength == candidate.pfn;
+            const bool prepend =
+                candidate.vpn + candidate.coalLength == entry.vpn &&
+                candidate.pfn + candidate.coalLength == entry.pfn;
+            const auto combined =
+                std::max(entry.vpn + entry.coalLength,
+                         candidate.vpn + candidate.coalLength) -
+                std::min(entry.vpn, candidate.vpn);
+
+            if ((append || prepend) && combined <= maxCoalescedEntries) {
+                mergeCoalesced(entry, candidate);
+                table.invalidate(&candidate);
+                table.invalidatePrev(&candidate);
+                progress = true;
+                break;
+            }
+        }
+    } while (progress);
+
+    if (entry.coalLength == 1) {
+        return false;
+    }
+
+    TlbEntry *victim = table.findVictim(TlbEntry::KeyType(entry));
+    *victim = entry;
+    table.insertEntry(TlbEntry::KeyType(entry), victim);
+    table.invalidatePrev(victim);
+    return true;
 }
 
 void
@@ -308,12 +456,17 @@ void
 TLB::flush(const TLBIOp& tlbi_op)
 {
     bool valid_entry = false;
+    const auto tlbi_key = tlbi_op.invalidateKey(vmid);
     for (auto& te : table) {
         if (tlbi_op.match(&te, vmid)) {
             DPRINTF(TLB, " -  %s\n", te.print());
-            table.invalidate(&te);
-
-            table.invalidatePrev(&te);
+            if (tlbi_key && te.coalLength > 1 && te.invalidateSubentries(*tlbi_key)
+                && te.valid) {
+                table.invalidatePrev(&te);
+            } else {
+                table.invalidate(&te);
+                table.invalidatePrev(&te);
+            }
 
             stats.flushedEntries++;
         }

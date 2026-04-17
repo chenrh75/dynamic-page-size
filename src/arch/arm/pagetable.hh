@@ -41,7 +41,9 @@
 #ifndef __ARCH_ARM_PAGETABLE_H__
 #define __ARCH_ARM_PAGETABLE_H__
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 
 #include "arch/arm/page_size.hh"
 #include "arch/arm/types.hh"
@@ -253,6 +255,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
 
     uint8_t
         coalLength; // FA: Number of contiguous entries coalesced into this one
+    uint64_t validSubentries; // One bit per constituent translation.
 
     LookupLevel lookupLevel;    // Lookup level where the descriptor was fetched
                                 // from.  Used to set the FSR for faults
@@ -313,6 +316,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
           vpn(_vaddr >> PageShift),
           attributes(0),
           coalLength(1),
+          validSubentries(1),
           lookupLevel(LookupLevel::L1),
           asid(_asn),
           vmid(0),
@@ -354,6 +358,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
           vpn(0),
           attributes(0),
           coalLength(1),
+          validSubentries(0),
           lookupLevel(LookupLevel::L1),
           asid(0),
           vmid(0),
@@ -401,6 +406,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         std::swap(vpn, rhs.vpn);
         std::swap(attributes, rhs.attributes);
         std::swap(coalLength, rhs.coalLength);
+        std::swap(validSubentries, rhs.validSubentries);
         std::swap(lookupLevel, rhs.lookupLevel);
         std::swap(asid, rhs.asid);
         std::swap(vmid, rhs.vmid);
@@ -434,6 +440,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     invalidate()
     {
         valid = false;
+        validSubentries = 0;
     }
 
     /** Need for compliance with the AssociativeCache interface */
@@ -448,6 +455,83 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         vpn = new_vaddr >> PageShift;
     }
 
+    static constexpr uint8_t MaxCoalescedEntries = 64;
+
+    static uint64_t
+    spanMask(uint8_t span)
+    {
+        return span >= MaxCoalescedEntries ?
+            std::numeric_limits<uint64_t>::max() : ((1ULL << span) - 1);
+    }
+
+    uint64_t
+    validMask() const
+    {
+        return validSubentries & spanMask(coalLength);
+    }
+
+    bool
+    hasValidSubentries() const
+    {
+        return validMask() != 0;
+    }
+
+    int
+    subentryIndex(Addr va) const
+    {
+        const Addr req_vpn = va >> N;
+        if (req_vpn < vpn || req_vpn >= vpn + coalLength) {
+            return -1;
+        }
+        return req_vpn - vpn;
+    }
+
+    bool
+    subentryValid(Addr va) const
+    {
+        const int index = subentryIndex(va);
+        return index >= 0 && (validMask() & (1ULL << index));
+    }
+
+    uint64_t
+    matchingSubentries(const KeyType &key) const
+    {
+        if (!valid || coalLength == 0) {
+            return 0;
+        }
+
+        const Addr page_addr = vpn << N;
+        const Addr page_end = (vpn + coalLength) << N;
+        const Addr req_start = key.va;
+        const Addr req_end = key.size ? key.va + key.size : key.va + (1ULL << N);
+
+        if (req_start >= page_end || req_end <= page_addr) {
+            return 0;
+        }
+
+        const Addr overlap_start = std::max(req_start, page_addr);
+        const Addr overlap_end = std::min(req_end, page_end);
+        const uint8_t first = (overlap_start >> N) - vpn;
+        const uint8_t last = ((overlap_end - 1) >> N) - vpn;
+        const uint64_t overlap_mask =
+            spanMask(last - first + 1) << first;
+
+        return validMask() & overlap_mask;
+    }
+
+    bool
+    invalidateSubentries(const KeyType &key)
+    {
+        const uint64_t matches = matchingSubentries(key);
+        if (!matches) {
+            return false;
+        }
+
+        validSubentries &= ~matches;
+        valid = hasValidSubentries();
+        return true;
+    }
+
     Addr
     pageStart() const
     {
@@ -457,16 +541,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     bool
     matchAddress(const KeyType &key) const
     {
-
-        Addr page_addr = vpn << N;
-        Addr page_end = (vpn + coalLength) << N;
-        if (key.size) {
-            // This is a range based loookup
-            return key.va < page_end && key.va + key.size > page_addr;
-        } else {
-            // This is a normal lookup
-            return key.va >= page_addr && key.va < page_end;
-        }
+        return matchingSubentries(key) != 0;
     }
 
     bool
@@ -499,6 +574,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         Addr req_vpn = va >> N;
         assert(req_vpn >= vpn);
         assert(req_vpn < vpn + coalLength);
+        assert(subentryValid(va));
         Addr offset = (va >> N) - vpn;
         return ((pfn + offset) << N) | (va & size);
     }
@@ -557,9 +633,9 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     {
         return csprintf(
             "%#x, asn %d vmn %d ppn %#x size: %#x coallength:%d ap:%d "
-            "ns:%d ss:%s g:%d xs: %d regime:%s",
+            "ns:%d ss:%s g:%d xs: %d regime:%s vmask:%#llx",
             vpn << N, asid, vmid, pfn << N, size, coalLength, ap, ns, ss,
-            global, xs, regimeToStr(regime));
+            global, xs, regimeToStr(regime), validMask());
     }
 
     void
@@ -586,6 +662,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         SERIALIZE_SCALAR(outerShareable);
         SERIALIZE_SCALAR(attributes);
         SERIALIZE_SCALAR(coalLength);
+        SERIALIZE_SCALAR(validSubentries);
         SERIALIZE_SCALAR(xn);
         SERIALIZE_SCALAR(pxn);
         SERIALIZE_SCALAR(ap);
@@ -617,6 +694,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         UNSERIALIZE_SCALAR(outerShareable);
         UNSERIALIZE_SCALAR(attributes);
         UNSERIALIZE_SCALAR(coalLength);
+        UNSERIALIZE_SCALAR(validSubentries);
         UNSERIALIZE_SCALAR(xn);
         UNSERIALIZE_SCALAR(pxn);
         UNSERIALIZE_SCALAR(ap);

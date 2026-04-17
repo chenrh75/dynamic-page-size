@@ -38,6 +38,8 @@
 #ifndef __ARCH_ARM_TLBI_HH__
 #define __ARCH_ARM_TLBI_HH__
 
+#include <optional>
+
 #include "arch/arm/system.hh"
 #include "arch/arm/tlb.hh"
 #include "cpu/thread_context.hh"
@@ -85,6 +87,11 @@ class TLBIOp
     bool match(TlbEntry *entry, vmid_t curr_vmid) const;
 
     virtual bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const = 0;
+    virtual std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const
+    {
+        return std::nullopt;
+    }
 
     /**
      * Return true if the TLBI op needs to flush stage1
@@ -223,7 +230,6 @@ class TLBIASID : public TLBIOp
     void operator()(ThreadContext* tc) override;
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
-
     uint16_t asid;
     bool el2Enabled;
 };
@@ -290,6 +296,11 @@ class TLBIMVAA : public TLBIOp
     void operator()(ThreadContext* tc) override;
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        return lookupGen(curr_vmid);
+    }
 
     Addr addr;
     bool lastLevel;
@@ -312,6 +323,11 @@ class TLBIMVA : public TLBIOp
     void operator()(ThreadContext* tc) override;
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        return lookupGen(curr_vmid);
+    }
 
     Addr addr;
     uint16_t asid;
@@ -443,6 +459,11 @@ class TLBIIPA : public TLBIOp
     void operator()(ThreadContext* tc) override;
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        return lookupGen(curr_vmid);
+    }
 
     bool
     stage1Flush() const override
@@ -466,6 +487,13 @@ class TLBIRMVA : public TLBIRange, public TLBIMVA
     {}
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        auto key = TLBIMVA::lookupGen(curr_vmid);
+        key.size = rangeSize();
+        return key;
+    }
 };
 
 /** TLB Range Invalidate by VA, All ASIDs */
@@ -479,6 +507,13 @@ class TLBIRMVAA : public TLBIRange, public TLBIMVAA
     {}
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        auto key = TLBIMVAA::lookupGen(curr_vmid);
+        key.size = rangeSize();
+        return key;
+    }
 };
 
 /** TLB Range Invalidate by VA, All ASIDs */
@@ -494,6 +529,13 @@ class TLBIRIPA : public TLBIRange, public TLBIIPA
     }
 
     bool matchEntry(TlbEntry *entry, vmid_t curr_vmid) const override;
+    std::optional<TlbEntry::KeyType>
+    invalidateKey(vmid_t curr_vmid) const override
+    {
+        auto key = TLBIIPA::lookupGen(curr_vmid);
+        key.size = rangeSize();
+        return key;
+    }
 };
 
 } // namespace ArmISA

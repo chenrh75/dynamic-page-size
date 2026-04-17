@@ -41,7 +41,6 @@
 #ifndef __ARCH_ARM_TLB_HH__
 #define __ARCH_ARM_TLB_HH__
 
-
 #include "arch/arm/faults.hh"
 #include "arch/arm/pagetable.hh"
 #include "arch/arm/utility.hh"
@@ -59,7 +58,8 @@ struct ArmTLBParams;
 
 class ThreadContext;
 
-namespace ArmISA {
+namespace ArmISA
+{
 
 class TableWalker;
 class TLB;
@@ -80,8 +80,7 @@ class TlbTestInterface
      * @param domain Domain type
      */
     virtual Fault translationCheck(const RequestPtr &req, bool is_priv,
-                                   BaseMMU::Mode mode,
-                                   DomainType domain) = 0;
+                                   BaseMMU::Mode mode, DomainType domain) = 0;
 
     /**
      * Check if a page table walker access should be forced to fail.
@@ -94,9 +93,8 @@ class TlbTestInterface
      * @param domain Domain type
      * @param lookup_level Page table walker level
      */
-    virtual Fault walkCheck(const RequestPtr &walk_req,
-                            Addr va, bool is_secure,
-                            Addr is_priv, BaseMMU::Mode mode,
+    virtual Fault walkCheck(const RequestPtr &walk_req, Addr va,
+                            bool is_secure, Addr is_priv, BaseMMU::Mode mode,
                             DomainType domain,
                             enums::ArmLookupLevel lookup_level) = 0;
 };
@@ -109,8 +107,8 @@ class TLB : public BaseTLB
       public:
         using AssociativeCache<TlbEntry>::AssociativeCache;
         using AssociativeCache<TlbEntry>::accessEntry;
-        TlbEntry* accessEntry(const KeyType &key) override;
-        TlbEntry* findEntry(const KeyType &key) const override;
+        TlbEntry *accessEntry(const KeyType &key) override;
+        TlbEntry *findEntry(const KeyType &key) const override;
 
         /**
          * Invalidate the last matched entry
@@ -121,15 +119,17 @@ class TLB : public BaseTLB
          * @param invalid flush prev if param is nullptr, otherwise
          *                only if prev == invalid
          */
-        void invalidatePrev(const TlbEntry *invalid=nullptr);
+        void invalidatePrev(const TlbEntry *invalid = nullptr);
 
       private:
         /** Last matched entry */
         mutable TlbEntry *prev = nullptr;
-    } table;
+    } table, superTable;
 
     /** TLB Size */
     int size;
+    bool coltFA;
+    unsigned maxCoalescedEntries;
 
     /** Indicates this TLB caches IPA->PA translations */
     bool isStage2;
@@ -178,7 +178,7 @@ class TLB : public BaseTLB
     probing::PMUUPtr ppInstRefills;
     probing::PMUUPtr ppDataRefills;
 
-    int rangeMRU; //On lookup, only move entries ahead when outside rangeMRU
+    int rangeMRU; // On lookup, only move entries ahead when outside rangeMRU
     vmid_t vmid;
 
     /** Set of observed page sizes in the TLB
@@ -218,11 +218,17 @@ class TLB : public BaseTLB
 
     void setTableWalker(TableWalker *table_walker, bool functional = false);
 
-    int getsize() const { return size; }
+    int
+    getsize() const
+    { return size; }
 
-    bool walkCache() const { return _walkCache; }
+    bool
+    walkCache() const
+    { return _walkCache; }
 
-    void setVMID(vmid_t _vmid) { vmid = _vmid; }
+    void
+    setVMID(vmid_t _vmid)
+    { vmid = _vmid; }
 
     /** Insert a PTE in the current TLB */
     void insert(const Lookup &lookup_data, TlbEntry &pte);
@@ -235,14 +241,14 @@ class TLB : public BaseTLB
      */
     void flushAll() override;
 
-
     /** Flush TLB entries
      */
     void flush(const TLBIOp &tlbi_op);
 
     void printTlb() const;
 
-    void demapPage(Addr vaddr, uint64_t asn) override
+    void
+    demapPage(Addr vaddr, uint64_t asn) override
     {
         // needed for x86 only
         panic("demapPage() is not implemented.\n");
@@ -251,24 +257,18 @@ class TLB : public BaseTLB
     Fault
     translateAtomic(const RequestPtr &req, ThreadContext *tc,
                     BaseMMU::Mode mode) override
-    {
-        panic("unimplemented");
-    }
+    { panic("unimplemented"); }
 
     void
     translateTiming(const RequestPtr &req, ThreadContext *tc,
                     BaseMMU::Translation *translation,
                     BaseMMU::Mode mode) override
-    {
-        panic("unimplemented");
-    }
+    { panic("unimplemented"); }
 
     Fault
     finalizePhysical(const RequestPtr &req, ThreadContext *tc,
                      BaseMMU::Mode mode) const override
-    {
-        panic("unimplemented");
-    }
+    { panic("unimplemented"); }
 
     void regProbePoints() override;
 
@@ -299,9 +299,8 @@ class TLB : public BaseTLB
      * @param entry_type type of entry to flush (instruction/data/unified)
      */
 
-    void _flushMva(Addr mva, uint64_t asn, bool secure_lookup,
-                   bool ignore_asn, ExceptionLevel target_el,
-                   bool in_host, TypeTLB entry_type);
+    void _flushMva(Addr mva, uint64_t asn, bool secure_lookup, bool ignore_asn,
+                   ExceptionLevel target_el, bool in_host, TypeTLB entry_type);
 
     /** Check if the tlb entry passed as an argument needs to
      * be "promoted" as a unified entry:
@@ -309,6 +308,9 @@ class TLB : public BaseTLB
      * data access or a data TLB entry on an instruction access:
      */
     void checkPromotion(TlbEntry *entry, BaseMMU::Mode mode);
+    bool canCoalesce(const TlbEntry &lhs, const TlbEntry &rhs) const;
+    void mergeCoalesced(TlbEntry &dst, const TlbEntry &src);
+    bool tryCoalesce(const Lookup &lookup_data, TlbEntry &entry);
 };
 
 } // namespace ArmISA

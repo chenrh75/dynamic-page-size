@@ -84,6 +84,9 @@ Stage2LookUp::mergeTe(BaseMMU::Mode mode)
     // Check again that we haven't got a fault
     if (fault == NoFault) {
         assert(stage2Te != NULL);
+        const Addr requested_va = s1Req->getVaddr();
+        const Addr requested_ipa = stage1Te.pAddr(requested_va);
+        const Addr requested_pa = stage2Te->pAddr(requested_ipa);
 
         // Now we have the table entries for both stages of translation
         // merge them and insert the result into the stage 1 TLB. See
@@ -171,6 +174,13 @@ Stage2LookUp::mergeTe(BaseMMU::Mode mode)
             stage1Te.xs = stage1Te.xs && stage2Te->xs;
         }
         stage1Te.updateAttributes();
+
+        // Preserve correctness for merged translations by collapsing any
+        // coalesced S1/S2 hit to the exact requested page.
+        stage1Te.vpn = requested_va >> stage1Te.N;
+        stage1Te.pfn = requested_pa >> stage1Te.N;
+        stage1Te.coalLength = 1;
+        stage1Te.validSubentries = 1;
     }
 
     // if there's a fault annotate it,
