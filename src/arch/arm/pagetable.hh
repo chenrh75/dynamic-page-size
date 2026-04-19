@@ -255,7 +255,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
 
     uint8_t
         coalLength; // FA: Number of contiguous entries coalesced into this one
-    uint64_t validSubentries; // One bit per constituent translation.
+    // uint64_t validSubentries; // One bit per constituent translation.
 
     LookupLevel lookupLevel;    // Lookup level where the descriptor was fetched
                                 // from.  Used to set the FSR for faults
@@ -316,7 +316,6 @@ struct TlbEntry : public ReplaceableEntry, Serializable
           vpn(_vaddr >> PageShift),
           attributes(0),
           coalLength(1),
-          validSubentries(1),
           lookupLevel(LookupLevel::L1),
           asid(_asn),
           vmid(0),
@@ -358,7 +357,6 @@ struct TlbEntry : public ReplaceableEntry, Serializable
           vpn(0),
           attributes(0),
           coalLength(1),
-          validSubentries(0),
           lookupLevel(LookupLevel::L1),
           asid(0),
           vmid(0),
@@ -406,7 +404,6 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         std::swap(vpn, rhs.vpn);
         std::swap(attributes, rhs.attributes);
         std::swap(coalLength, rhs.coalLength);
-        std::swap(validSubentries, rhs.validSubentries);
         std::swap(lookupLevel, rhs.lookupLevel);
         std::swap(asid, rhs.asid);
         std::swap(vmid, rhs.vmid);
@@ -440,7 +437,8 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     invalidate()
     {
         valid = false;
-        validSubentries = 0;
+        coalLength = 0;
+        // validSubentries = 0; --- IGNORE ---
     }
 
     /** Need for compliance with the AssociativeCache interface */
@@ -464,17 +462,17 @@ struct TlbEntry : public ReplaceableEntry, Serializable
             std::numeric_limits<uint64_t>::max() : ((1ULL << span) - 1);
     }
 
-    uint64_t
-    validMask() const
-    {
-        return validSubentries & spanMask(coalLength);
-    }
+    // uint64_t
+    // validMask() const
+    // {
+    //     return validSubentries & spanMask(coalLength);
+    // }
 
-    bool
-    hasValidSubentries() const
-    {
-        return validMask() != 0;
-    }
+    // bool
+    // hasValidSubentries() const
+    // {
+    //     return validMask() != 0;
+    // }
 
     int
     subentryIndex(Addr va) const
@@ -490,7 +488,7 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     subentryValid(Addr va) const
     {
         const int index = subentryIndex(va);
-        return index >= 0 && (validMask() & (1ULL << index));
+        return valid && index >= 0 && index < coalLength;
     }
 
     uint64_t
@@ -516,21 +514,65 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         const uint64_t overlap_mask =
             spanMask(last - first + 1) << first;
 
-        return validMask() & overlap_mask;
+        return overlap_mask;
     }
 
+    // bool
+    // invalidateSubentries(const KeyType &key)
+    // {
+    //     const uint64_t matches = matchingSubentries(key);
+    //     if (!matches) {
+    //         return false;
+    //     }
+
+    //     validSubentries &= ~matches;
+    //     valid = hasValidSubentries();
+    //     return true;
+    // }
+
     bool
-    invalidateSubentries(const KeyType &key)
+    splitOnInvalidate(const KeyType &key,
+                    TlbEntry &entry_one,
+                    TlbEntry &entry_two) const
     {
         const uint64_t matches = matchingSubentries(key);
         if (!matches) {
+            entry_one.valid = false;
+            entry_one.coalLength = 0;
+            entry_two.valid = false;
+            entry_two.coalLength = 0;
             return false;
         }
 
-        validSubentries &= ~matches;
-        valid = hasValidSubentries();
+        const int first = ctz64(matches);
+        const int last = 63 - clz64(matches);
+
+        const int left_len = first;
+        const int right_len = coalLength - (last + 1);
+
+        if (left_len > 0) {
+            entry_one = *this;
+            entry_one.coalLength = left_len;
+            entry_one.valid = true;
+        } else {
+            entry_one.valid = false;
+            entry_one.coalLength = 0;
+        }
+
+        if (right_len > 0) {
+            entry_two = *this;
+            entry_two.vpn += last + 1;
+            entry_two.pfn += last + 1;
+            entry_two.coalLength = right_len;
+            entry_two.valid = true;
+        } else {
+            entry_two.valid = false;
+            entry_two.coalLength = 0;
+        }
+
         return true;
     }
+
 
     Addr
     pageStart() const
@@ -633,9 +675,9 @@ struct TlbEntry : public ReplaceableEntry, Serializable
     {
         return csprintf(
             "%#x, asn %d vmn %d ppn %#x size: %#x coallength:%d ap:%d "
-            "ns:%d ss:%s g:%d xs: %d regime:%s vmask:%#llx",
+            "ns:%d ss:%s g:%d xs: %d regime:%s",
             vpn << N, asid, vmid, pfn << N, size, coalLength, ap, ns, ss,
-            global, xs, regimeToStr(regime), validMask());
+            global, xs, regimeToStr(regime));
     }
 
     void
@@ -662,7 +704,6 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         SERIALIZE_SCALAR(outerShareable);
         SERIALIZE_SCALAR(attributes);
         SERIALIZE_SCALAR(coalLength);
-        SERIALIZE_SCALAR(validSubentries);
         SERIALIZE_SCALAR(xn);
         SERIALIZE_SCALAR(pxn);
         SERIALIZE_SCALAR(ap);
@@ -694,7 +735,6 @@ struct TlbEntry : public ReplaceableEntry, Serializable
         UNSERIALIZE_SCALAR(outerShareable);
         UNSERIALIZE_SCALAR(attributes);
         UNSERIALIZE_SCALAR(coalLength);
-        UNSERIALIZE_SCALAR(validSubentries);
         UNSERIALIZE_SCALAR(xn);
         UNSERIALIZE_SCALAR(pxn);
         UNSERIALIZE_SCALAR(ap);

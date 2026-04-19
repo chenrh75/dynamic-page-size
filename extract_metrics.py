@@ -27,9 +27,12 @@ import math
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
-
-
+from typing import (
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 
 STAT_LINE_RE = re.compile(
     r"""^\s*
@@ -67,10 +70,10 @@ def parse_value(raw: str):
     return val
 
 
-def parse_stats_file(path: str) -> Dict[str, float]:
-    stats: Dict[str, float] = {}
+def parse_stats_file(path: str) -> dict[str, float]:
+    stats: dict[str, float] = {}
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 m = STAT_LINE_RE.match(line)
                 if not m:
@@ -83,14 +86,14 @@ def parse_stats_file(path: str) -> Dict[str, float]:
     return stats
 
 
-def get_first(stats: Dict[str, float], *keys: str) -> Optional[float]:
+def get_first(stats: dict[str, float], *keys: str) -> float | None:
     for key in keys:
         if key in stats:
             return stats[key]
     return None
 
 
-def safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
+def safe_div(num: float | None, den: float | None) -> float | None:
     if num is None or den is None:
         return None
     if den == 0:
@@ -98,11 +101,11 @@ def safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
     return num / den
 
 
-def pct(x: Optional[float]) -> str:
+def pct(x: float | None) -> str:
     return "n/a" if x is None else f"{100.0 * x:.4f}%"
 
 
-def fmt(x: Optional[float]) -> str:
+def fmt(x: float | None) -> str:
     if x is None:
         return "n/a"
     if isinstance(x, float):
@@ -116,13 +119,15 @@ def fmt(x: Optional[float]) -> str:
     return f"{x:,}"
 
 
-def mpki(misses: Optional[float], insts: Optional[float]) -> Optional[float]:
+def mpki(misses: float | None, insts: float | None) -> float | None:
     if misses is None or insts is None or insts == 0:
         return None
     return (misses * 1000.0) / insts
 
 
-def extract_tlb_block(stats: Dict[str, float], prefix: str, kind: str) -> Dict[str, Optional[float]]:
+def extract_tlb_block(
+    stats: dict[str, float], prefix: str, kind: str
+) -> dict[str, float | None]:
     """
     kind:
       - 'dtb'
@@ -201,7 +206,7 @@ def extract_tlb_block(stats: Dict[str, float], prefix: str, kind: str) -> Dict[s
     raise ValueError(f"Unknown TLB kind: {kind}")
 
 
-def extract_custom_counters(stats: Dict[str, float]) -> Dict[str, float]:
+def extract_custom_counters(stats: dict[str, float]) -> dict[str, float]:
     out = {}
     for key, value in stats.items():
         k = key.lower()
@@ -210,8 +215,12 @@ def extract_custom_counters(stats: Dict[str, float]) -> Dict[str, float]:
     return dict(sorted(out.items()))
 
 
-def summarize(path: str, stats: Dict[str, float]) -> Tuple[Dict[str, Optional[float]], Dict[str, float]]:
-    sim_insts = get_first(stats, "simInsts", "system.cpu.commitStats0.numInsts")
+def summarize(
+    path: str, stats: dict[str, float]
+) -> tuple[dict[str, float | None], dict[str, float]]:
+    sim_insts = get_first(
+        stats, "simInsts", "system.cpu.commitStats0.numInsts"
+    )
     sim_ops = get_first(stats, "simOps", "system.cpu.commitStats0.numOps")
     cycles = get_first(stats, "system.cpu.numCycles")
     ipc = get_first(stats, "system.cpu.ipc", "system.cpu.commitStats0.ipc")
@@ -226,8 +235,12 @@ def summarize(path: str, stats: Dict[str, float]) -> Tuple[Dict[str, Optional[fl
     l2 = extract_tlb_block(stats, "system.cpu.mmu.l2_shared", "l2")
 
     walker_total = get_first(stats, "system.cpu.mmu.walker.walks")
-    walker_inst_s1 = get_first(stats, "system.cpu.mmu.walker.instructionWalksS1")
-    walker_inst_s2 = get_first(stats, "system.cpu.mmu.walker.instructionWalksS2")
+    walker_inst_s1 = get_first(
+        stats, "system.cpu.mmu.walker.instructionWalksS1"
+    )
+    walker_inst_s2 = get_first(
+        stats, "system.cpu.mmu.walker.instructionWalksS2"
+    )
     walker_data_s1 = get_first(stats, "system.cpu.mmu.walker.dataWalksS1")
     walker_data_s2 = get_first(stats, "system.cpu.mmu.walker.dataWalksS2")
 
@@ -238,7 +251,7 @@ def summarize(path: str, stats: Dict[str, float]) -> Tuple[Dict[str, Optional[fl
     if dtb["accesses"] is not None or itb["accesses"] is not None:
         l1_tlb_accesses = (dtb["accesses"] or 0) + (itb["accesses"] or 0)
 
-    row: Dict[str, Optional[float]] = {
+    row: dict[str, float | None] = {
         "file": os.path.basename(path),
         "simInsts": sim_insts,
         "simOps": sim_ops,
@@ -249,30 +262,25 @@ def summarize(path: str, stats: Dict[str, float]) -> Tuple[Dict[str, Optional[fl
         "simSeconds": sim_seconds,
         "hostSeconds": host_seconds,
         "numMemRefs": num_mem_refs,
-
         "dtlb_hits": dtb["hits"],
         "dtlb_misses": dtb["misses"],
         "dtlb_accesses": dtb["accesses"],
         "dtlb_miss_rate": dtb["miss_rate"],
         "dtlb_mpki": mpki(dtb["misses"], sim_insts),
-
         "itlb_hits": itb["hits"],
         "itlb_misses": itb["misses"],
         "itlb_accesses": itb["accesses"],
         "itlb_miss_rate": itb["miss_rate"],
         "itlb_mpki": mpki(itb["misses"], sim_insts),
-
         "l1_tlb_misses_total": l1_tlb_misses,
         "l1_tlb_accesses_total": l1_tlb_accesses,
         "l1_tlb_miss_rate_total": safe_div(l1_tlb_misses, l1_tlb_accesses),
         "l1_tlb_mpki_total": mpki(l1_tlb_misses, sim_insts),
-
         "l2_tlb_hits": l2["hits"],
         "l2_tlb_misses": l2["misses"],
         "l2_tlb_accesses": l2["accesses"],
         "l2_tlb_miss_rate": l2["miss_rate"],
         "l2_tlb_mpki": mpki(l2["misses"], sim_insts),
-
         "walker_walks_total": walker_total,
         "walker_inst_s1": walker_inst_s1,
         "walker_inst_s2": walker_inst_s2,
@@ -284,7 +292,9 @@ def summarize(path: str, stats: Dict[str, float]) -> Tuple[Dict[str, Optional[fl
     return row, extract_custom_counters(stats)
 
 
-def print_summary(row: Dict[str, Optional[float]], custom: Dict[str, float]) -> None:
+def print_summary(
+    row: dict[str, float | None], custom: dict[str, float]
+) -> None:
     print("=" * 88)
     print(f"FILE: {row['file']}")
     print("-" * 88)
@@ -298,17 +308,27 @@ def print_summary(row: Dict[str, Optional[float]], custom: Dict[str, float]) -> 
     print(f"  hostSeconds     : {fmt(row['hostSeconds'])}")
 
     print("\nTLB METRICS")
-    print(f"  L1 DTLB misses  : {fmt(row['dtlb_misses'])}  "
-          f"(accesses={fmt(row['dtlb_accesses'])}, miss_rate={pct(row['dtlb_miss_rate'])}, MPKI={fmt(row['dtlb_mpki'])})")
-    print(f"  L1 ITLB misses  : {fmt(row['itlb_misses'])}  "
-          f"(accesses={fmt(row['itlb_accesses'])}, miss_rate={pct(row['itlb_miss_rate'])}, MPKI={fmt(row['itlb_mpki'])})")
-    print(f"  L1 total misses : {fmt(row['l1_tlb_misses_total'])}  "
-          f"(accesses={fmt(row['l1_tlb_accesses_total'])}, miss_rate={pct(row['l1_tlb_miss_rate_total'])}, MPKI={fmt(row['l1_tlb_mpki_total'])})")
-    print(f"  L2 TLB misses   : {fmt(row['l2_tlb_misses'])}  "
-          f"(accesses={fmt(row['l2_tlb_accesses'])}, miss_rate={pct(row['l2_tlb_miss_rate'])}, MPKI={fmt(row['l2_tlb_mpki'])})")
+    print(
+        f"  L1 DTLB misses  : {fmt(row['dtlb_misses'])}  "
+        f"(accesses={fmt(row['dtlb_accesses'])}, miss_rate={pct(row['dtlb_miss_rate'])}, MPKI={fmt(row['dtlb_mpki'])})"
+    )
+    print(
+        f"  L1 ITLB misses  : {fmt(row['itlb_misses'])}  "
+        f"(accesses={fmt(row['itlb_accesses'])}, miss_rate={pct(row['itlb_miss_rate'])}, MPKI={fmt(row['itlb_mpki'])})"
+    )
+    print(
+        f"  L1 total misses : {fmt(row['l1_tlb_misses_total'])}  "
+        f"(accesses={fmt(row['l1_tlb_accesses_total'])}, miss_rate={pct(row['l1_tlb_miss_rate_total'])}, MPKI={fmt(row['l1_tlb_mpki_total'])})"
+    )
+    print(
+        f"  L2 TLB misses   : {fmt(row['l2_tlb_misses'])}  "
+        f"(accesses={fmt(row['l2_tlb_accesses'])}, miss_rate={pct(row['l2_tlb_miss_rate'])}, MPKI={fmt(row['l2_tlb_mpki'])})"
+    )
 
     print("\nPAGE WALKER")
-    print(f"  total walks     : {fmt(row['walker_walks_total'])}  (MPKI={fmt(row['walker_mpki'])})")
+    print(
+        f"  total walks     : {fmt(row['walker_walks_total'])}  (MPKI={fmt(row['walker_mpki'])})"
+    )
     print(f"  inst walks S1   : {fmt(row['walker_inst_s1'])}")
     print(f"  inst walks S2   : {fmt(row['walker_inst_s2'])}")
     print(f"  data walks S1   : {fmt(row['walker_data_s1'])}")
@@ -323,18 +343,46 @@ def print_summary(row: Dict[str, Optional[float]], custom: Dict[str, float]) -> 
         print("  none detected by name pattern")
 
 
-def write_csv(rows: List[Dict[str, Optional[float]]], out_path: str) -> None:
+def write_csv(rows: list[dict[str, float | None]], out_path: str) -> None:
     if not rows:
         return
 
     fieldnames = [
         "file",
-        "simInsts", "simOps", "numCycles", "ipc", "cpi", "simTicks", "simSeconds", "hostSeconds", "numMemRefs",
-        "dtlb_hits", "dtlb_misses", "dtlb_accesses", "dtlb_miss_rate", "dtlb_mpki",
-        "itlb_hits", "itlb_misses", "itlb_accesses", "itlb_miss_rate", "itlb_mpki",
-        "l1_tlb_misses_total", "l1_tlb_accesses_total", "l1_tlb_miss_rate_total", "l1_tlb_mpki_total",
-        "l2_tlb_hits", "l2_tlb_misses", "l2_tlb_accesses", "l2_tlb_miss_rate", "l2_tlb_mpki",
-        "walker_walks_total", "walker_inst_s1", "walker_inst_s2", "walker_data_s1", "walker_data_s2", "walker_mpki",
+        "simInsts",
+        "simOps",
+        "numCycles",
+        "ipc",
+        "cpi",
+        "simTicks",
+        "simSeconds",
+        "hostSeconds",
+        "numMemRefs",
+        "dtlb_hits",
+        "dtlb_misses",
+        "dtlb_accesses",
+        "dtlb_miss_rate",
+        "dtlb_mpki",
+        "itlb_hits",
+        "itlb_misses",
+        "itlb_accesses",
+        "itlb_miss_rate",
+        "itlb_mpki",
+        "l1_tlb_misses_total",
+        "l1_tlb_accesses_total",
+        "l1_tlb_miss_rate_total",
+        "l1_tlb_mpki_total",
+        "l2_tlb_hits",
+        "l2_tlb_misses",
+        "l2_tlb_accesses",
+        "l2_tlb_miss_rate",
+        "l2_tlb_mpki",
+        "walker_walks_total",
+        "walker_inst_s1",
+        "walker_inst_s2",
+        "walker_data_s1",
+        "walker_data_s2",
+        "walker_mpki",
     ]
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -344,7 +392,7 @@ def write_csv(rows: List[Dict[str, Optional[float]]], out_path: str) -> None:
             writer.writerow(row)
 
 
-def print_comparison(rows: List[Dict[str, Optional[float]]]) -> None:
+def print_comparison(rows: list[dict[str, float | None]]) -> None:
     if len(rows) < 2:
         return
 
@@ -389,12 +437,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Extract CoLT-relevant performance and TLB metrics from gem5 stats.txt files."
     )
-    parser.add_argument("stats_files", nargs="+", help="One or more gem5 stats.txt files")
+    parser.add_argument(
+        "stats_files", nargs="+", help="One or more gem5 stats.txt files"
+    )
     parser.add_argument("-o", "--output-csv", help="Optional output CSV path")
     args = parser.parse_args()
 
-    rows: List[Dict[str, Optional[float]]] = []
-    customs: List[Dict[str, float]] = []
+    rows: list[dict[str, float | None]] = []
+    customs: list[dict[str, float]] = []
 
     for path in args.stats_files:
         try:

@@ -327,14 +327,15 @@ TLB::mergeCoalesced(TlbEntry &dst, const TlbEntry &src)
 
     const uint8_t dst_shift = dst.vpn - new_base_vpn;
     const uint8_t src_shift = src.vpn - new_base_vpn;
-    const uint64_t merged_mask =
-        (dst.validMask() << dst_shift) | (src.validMask() << src_shift);
+    // const uint64_t merged_mask =
+    //     (dst.validMask() << dst_shift) | (src.validMask() << src_shift);
 
     dst.vpn = new_base_vpn;
     dst.pfn = new_base_pfn;
     dst.coalLength = new_length;
-    dst.validSubentries = merged_mask;
-    dst.valid = dst.hasValidSubentries();
+    // dst.validSubentries = merged_mask;
+    // dst.valid = dst.hasValidSubentries();
+    dst.valid = true;
 
     if (prepend) {
         table.invalidatePrev();
@@ -351,7 +352,7 @@ TLB::tryCoalesce(const Lookup &lookup_data, TlbEntry &entry)
     }
 
     entry.coalLength = std::max<uint8_t>(entry.coalLength, 1);
-    entry.validSubentries = entry.validMask() ? entry.validMask() : 1;
+    // entry.validSubentries = entry.validMask() ? entry.validMask() : 1;
 
     for (auto &candidate : table) {
         if (!canCoalesce(candidate, entry)) {
@@ -361,9 +362,10 @@ TLB::tryCoalesce(const Lookup &lookup_data, TlbEntry &entry)
         if (candidate.vpn <= entry.vpn &&
             entry.vpn < candidate.vpn + candidate.coalLength &&
             candidate.pfn + (entry.vpn - candidate.vpn) == entry.pfn) {
-            candidate.validSubentries |=
-                1ULL << static_cast<uint8_t>(entry.vpn - candidate.vpn);
-            candidate.valid = candidate.hasValidSubentries();
+            // candidate.validSubentries |=
+            //     1ULL << static_cast<uint8_t>(entry.vpn - candidate.vpn);
+            // candidate.valid = candidate.hasValidSubentries();
+            candidate.valid = true;
             table.accessEntry(&candidate);
             return true;
         }
@@ -460,9 +462,28 @@ TLB::flush(const TLBIOp& tlbi_op)
     for (auto& te : table) {
         if (tlbi_op.match(&te, vmid)) {
             DPRINTF(TLB, " -  %s\n", te.print());
-            if (tlbi_key && te.coalLength > 1 && te.invalidateSubentries(*tlbi_key)
-                && te.valid) {
-                table.invalidatePrev(&te);
+            if (tlbi_key && te.coalLength > 1) {
+                TlbEntry entry_one, entry_two;
+                if (te.splitOnInvalidate(*tlbi_key, entry_one, entry_two)) {
+                    table.invalidate(&te);
+                    table.invalidatePrev(&te);
+                    if (entry_one.valid) {
+                        auto *victim_one = table.findVictim(TlbEntry::KeyType(entry_one));
+                        *victim_one = entry_one;
+                        table.insertEntry(TlbEntry::KeyType(entry_one), victim_one);
+                        table.invalidatePrev(victim_one);
+                    }
+                    if (entry_two.valid) {
+                        auto *victim_two = table.findVictim(TlbEntry::KeyType(entry_two));
+                        *victim_two = entry_two;
+                        table.insertEntry(TlbEntry::KeyType(entry_two), victim_two);
+                        table.invalidatePrev(victim_two);
+                    }
+                } else {
+                    table.invalidate(&te);
+                    table.invalidatePrev(&te);
+                }
+
             } else {
                 table.invalidate(&te);
                 table.invalidatePrev(&te);
@@ -470,10 +491,14 @@ TLB::flush(const TLBIOp& tlbi_op)
 
             stats.flushedEntries++;
         }
-        valid_entry = valid_entry || te.valid;
+        // valid_entry = valid_entry || te.valid;
     }
 
     stats.flushTlb++;
+    bool valid_entry = false;
+    for (const auto &entry : table) {
+        valid_entry = valid_entry || entry.valid;
+    }
     if (!valid_entry)
         observedPageSizes.clear();
 }
