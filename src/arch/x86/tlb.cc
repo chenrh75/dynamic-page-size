@@ -64,6 +64,7 @@ namespace X86ISA {
 
 TLB::TLB(const Params &p)
     : BaseTLB(p), configAddress(0), size(p.size),
+      coltFA(p.colt_fa), maxCoalescedEntries(p.max_coalesced_entries),
       tlb(size), lruSeq(0), m5opRange(p.system->m5opRange()), stats(this)
 {
     if (!size)
@@ -71,11 +72,33 @@ TLB::TLB(const Params &p)
 
     for (int x = 0; x < size; x++) {
         tlb[x].trieHandle = NULL;
+        tlb[x].valid = false;
+        tlb[x].coalLength = 1;
         freeList.push_back(&tlb[x]);
     }
 
     walker = p.walker;
     walker->setTLB(this);
+}
+
+void
+TLB::invalidateEntry(TlbEntry *entry)
+{
+    if (!entry)
+        return;
+
+    if (!entry->valid && entry->trieHandle == NULL)
+        return;
+
+    if (entry->trieHandle) {
+        trie.remove(entry->trieHandle);
+        entry->trieHandle = NULL;
+    }
+
+    entry->valid = false;
+    entry->coalLength = 1;
+
+    freeList.push_back(entry);
 }
 
 void
@@ -91,9 +114,155 @@ TLB::evictLRU()
     }
 
     assert(tlb[lru].trieHandle);
-    trie.remove(tlb[lru].trieHandle);
-    tlb[lru].trieHandle = NULL;
-    freeList.push_back(&tlb[lru]);
+    invalidateEntry(&tlb[lru]);
+}
+
+TlbEntry *
+TLB::lookupCoalesced(Addr va, uint64_t pcid, bool update_lru)
+{
+    if (!coltFA)
+        return nullptr;
+
+    for (auto &entry : tlb) {
+        if (!entry.valid)
+            continue;
+
+        if (!entry.isCoalesced())
+            continue;
+
+        if (entry.contains(va, pcid)) {
+            if (update_lru)
+                entry.lruSeq = nextSeq();
+
+            return &entry;
+        }
+    }
+
+    return nullptr;
+}
+
+bool
+TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
+{
+    if (!a || !b)
+        return false;
+
+    if (a == b)
+        return false;
+
+    if (!a->valid || !b->valid)
+        return false;
+
+    // TODO: only coalesce base 4 KB pages for now.
+    if (a->logBytes != X86ISA::PageShift ||
+        b->logBytes != X86ISA::PageShift) {
+        return false;
+    }
+
+    if (a->logBytes != b->logBytes)
+        return false;
+
+    if (a->pcid != b->pcid)
+        return false;
+
+    if (a->writable != b->writable ||
+        a->user != b->user ||
+        a->uncacheable != b->uncacheable ||
+        a->global != b->global ||
+        a->patBit != b->patBit ||
+        a->noExec != b->noExec) {
+        return false;
+    }
+
+    return true;
+}
+
+void
+TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent entries if possible
+{
+    if (!coltFA || !entry || !entry->valid)
+        return;
+
+    bool changed = true;
+
+    while (changed) {
+        changed = false;
+
+        for (auto &candidate : tlb) {
+            if (!canCoalesce(entry, &candidate))
+                continue;
+
+            const Addr page_size = entry->size();
+
+            const Addr entry_vend =
+                entry->vaddr + entry->coalLength * page_size;
+            const Addr entry_pend =
+                entry->paddr + entry->coalLength * page_size;
+
+            const Addr cand_vend =
+                candidate.vaddr + candidate.coalLength * page_size;
+            const Addr cand_pend =
+                candidate.paddr + candidate.coalLength * page_size;
+
+            const bool append =
+                entry_vend == candidate.vaddr &&
+                entry_pend == candidate.paddr;
+
+            const bool prepend =
+                cand_vend == entry->vaddr &&
+                cand_pend == entry->paddr;
+
+            if (!append && !prepend)
+                continue;
+
+            const unsigned new_len =
+                entry->coalLength + candidate.coalLength;
+
+            if (new_len > maxCoalescedEntries)
+                continue;
+
+            // Remove old trie mappings. The coalesced entry will get a new
+            // trie mapping at its new base address.
+            if (entry->trieHandle) {
+                trie.remove(entry->trieHandle);
+                entry->trieHandle = NULL;
+            }
+
+            if (candidate.trieHandle) {
+                trie.remove(candidate.trieHandle);
+                candidate.trieHandle = NULL;
+            }
+
+            if (prepend) {
+                entry->vaddr = candidate.vaddr;
+                entry->paddr = candidate.paddr;
+            }
+
+            entry->coalLength = new_len;
+            entry->lruSeq = nextSeq();
+
+            candidate.valid = false;
+            candidate.coalLength = 1;
+            freeList.push_back(&candidate);
+
+            const Addr trie_vpn = concAddrPcid(entry->vaddr, entry->pcid);
+
+            if (FullSystem) {
+                entry->trieHandle = trie.insert(
+                    trie_vpn,
+                    TlbEntryTrie::MaxBits - entry->logBytes,
+                    entry);
+            } else {
+                entry->trieHandle = trie.insert(
+                    trie_vpn,
+                    TlbEntryTrie::MaxBits,
+                    entry);
+            }
+
+            changed = true;
+            break;
+        }
+    }
 }
 
 TlbEntry *
@@ -103,12 +272,13 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
     //that multiple processes using the same
     //tlb do not conflict when using the same
     //virtual addresses
-    vpn = concAddrPcid(vpn, pcid);
+    Addr raw_vpn = vpn;
+    Addr trie_vpn = concAddrPcid(vpn, pcid);
 
     // If somebody beat us to it, just use that existing entry.
-    TlbEntry *newEntry = trie.lookup(vpn);
+    TlbEntry *newEntry = trie.lookup(trie_vpn);
     if (newEntry) {
-        assert(newEntry->vaddr == vpn);
+        assert(newEntry->vaddr == raw_vpn); // is it true?
         return newEntry;
     }
 
@@ -120,15 +290,21 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
 
     *newEntry = entry;
     newEntry->lruSeq = nextSeq();
-    newEntry->vaddr = vpn;
+    newEntry->vaddr = raw_vpn;
+    newEntry->pcid = pcid;
+    newEntry->valid = true;
+
     if (FullSystem) {
         newEntry->trieHandle =
-        trie.insert(vpn, TlbEntryTrie::MaxBits-entry.logBytes, newEntry);
+        trie.insert(trie_vpn, TlbEntryTrie::MaxBits-entry.logBytes, newEntry);
     }
     else {
         newEntry->trieHandle =
-        trie.insert(vpn, TlbEntryTrie::MaxBits, newEntry);
+        trie.insert(trie_vpn, TlbEntryTrie::MaxBits, newEntry);
     }
+
+    tryCoalesce(newEntry);
+
     return newEntry;
 }
 
@@ -145,12 +321,17 @@ void
 TLB::flushAll()
 {
     DPRINTF(TLB, "Invalidating all entries.\n");
+
+    freeList.clear();
+
     for (unsigned i = 0; i < size; i++) {
         if (tlb[i].trieHandle) {
             trie.remove(tlb[i].trieHandle);
             tlb[i].trieHandle = NULL;
-            freeList.push_back(&tlb[i]);
         }
+        tlb[i].valid = false;
+        tlb[i].coalLength = 1;
+        freeList.push_back(&tlb[i]);
     }
 }
 
@@ -166,21 +347,41 @@ TLB::flushNonGlobal()
     DPRINTF(TLB, "Invalidating all non global entries.\n");
     for (unsigned i = 0; i < size; i++) {
         if (tlb[i].trieHandle && !tlb[i].global) {
-            trie.remove(tlb[i].trieHandle);
-            tlb[i].trieHandle = NULL;
-            freeList.push_back(&tlb[i]);
+            invalidateEntry(&tlb[i]);
         }
     }
 }
 
 void
-TLB::demapPage(Addr va, uint64_t asn)
+TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
 {
+    const Addr raw_va = va & ~mask(X86ISA::PageShift);
+    const uint64_t pcid = asn & mask(X86ISA::PageShift);
+
+    if (coltFA) {
+        for (auto &entry : tlb) {
+            if (!entry.valid || !entry.isCoalesced())
+                continue;
+
+            // Conservative: if the raw VA is covered, invalidate the whole
+            // coalesced entry. This may over-invalidate across PCIDs, but it
+            // will not keep stale translations.
+            const Addr page_size = entry.size();
+            const Addr entry_begin = entry.vaddr;
+            const Addr entry_end =
+                entry.vaddr + entry.coalLength * page_size;
+
+            if (raw_va >= entry_begin && raw_va < entry_end) {
+                invalidateEntry(&entry);
+                return;
+            }
+        }
+    }
+
+    const Addr trie_va = concAddrPcid(raw_va, pcid);
     TlbEntry *entry = trie.lookup(va);
     if (entry) {
-        trie.remove(entry->trieHandle);
-        entry->trieHandle = NULL;
-        freeList.push_back(entry);
+        invalidateEntry(entry);
     }
 }
 
@@ -406,17 +607,32 @@ TLB::translate(const RequestPtr &req,
             //Appending the pcid (last 12 bits of CR3) to the
             //page aligned vaddr if pcide is set
             CR4 cr4 = tc->readMiscRegNoEffect(misc_reg::Cr4);
-            Addr pageAlignedVaddr = vaddr & (~mask(X86ISA::PageShift));
+            // Addr pageAlignedVaddr = vaddr & (~mask(X86ISA::PageShift));
+            // CR3 cr3 = tc->readMiscRegNoEffect(misc_reg::Cr3);
+            // uint64_t pcid;
+
+            // if (cr4.pcide)
+            //     pcid = cr3.pcid;
+            // else
+            //     pcid = 0x000;
+
+            // pageAlignedVaddr = concAddrPcid(pageAlignedVaddr, pcid);
+            // TlbEntry *entry = lookup(pageAlignedVaddr);
+
+            Addr rawPageAlignedVaddr = vaddr & (~mask(X86ISA::PageShift));
+
             CR3 cr3 = tc->readMiscRegNoEffect(misc_reg::Cr3);
             uint64_t pcid;
-
             if (cr4.pcide)
                 pcid = cr3.pcid;
             else
                 pcid = 0x000;
 
-            pageAlignedVaddr = concAddrPcid(pageAlignedVaddr, pcid);
-            TlbEntry *entry = lookup(pageAlignedVaddr);
+            Addr triePageAlignedVaddr = concAddrPcid(rawPageAlignedVaddr, pcid);
+
+            TlbEntry *entry = lookupCoalesced(vaddr, pcid);
+            if (!entry)
+                entry = lookup(triePageAlignedVaddr);
 
             switch (mode) {
                 case BaseMMU::Read:
@@ -457,7 +673,10 @@ TLB::translate(const RequestPtr &req,
                         delayedResponse = true;
                         return fault;
                     }
-                    entry = lookup(pageAlignedVaddr);
+                    entry = lookupCoalesced(vaddr, pcid);
+                    if (!entry)
+                        entry = lookup(triePageAlignedVaddr);
+
                     assert(entry);
                 } else {
                     Process *p = tc->getProcessPtr();
@@ -470,11 +689,12 @@ TLB::translate(const RequestPtr &req,
                         Addr alignedVaddr = p->pTable->pageAlign(vaddr);
                         DPRINTF(TLB, "Mapping %#x to %#x\n", alignedVaddr,
                                 pte->paddr);
-                        entry = insert(alignedVaddr, TlbEntry(
-                                p->pTable->pid(), alignedVaddr, pte->paddr,
+                    entry = insert(alignedVaddr,
+                        TlbEntry(p->pTable->pid(), alignedVaddr, pte->paddr,
+                                1, pcid,
                                 pte->flags & EmulationPageTable::Uncacheable,
                                 pte->flags & EmulationPageTable::ReadOnly),
-                                pcid);
+                        pcid);
                     }
                     DPRINTF(TLB, "Miss was serviced.\n");
                 }
@@ -501,7 +721,14 @@ TLB::translate(const RequestPtr &req,
                     vaddr, true, BaseMMU::Write, inUser, false);
             }
 
-            Addr paddr = entry->paddr | (vaddr & mask(entry->logBytes));
+            // Addr paddr = entry->paddr | (vaddr & mask(entry->logBytes));
+            Addr paddr;
+
+            if (entry->isCoalesced())
+                paddr = entry->pAddr(vaddr);
+            else
+                paddr = entry->paddr | (vaddr & mask(entry->logBytes));
+
             DPRINTF(TLB, "Translated %#x -> %#x.\n", vaddr, paddr);
             req->setPaddr(paddr);
             if (entry->uncacheable)

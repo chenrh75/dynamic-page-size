@@ -69,6 +69,14 @@ namespace X86ISA
 
         // The beginning of the virtual page this entry maps.
         Addr vaddr;
+
+        // The number of contiguous pages this entry maps, starting with the one
+        unsigned coalLength;
+
+        unsigned pcid;
+
+        bool valid;
+
         // The size of the page this represents, in address bits.
         unsigned logBytes;
 
@@ -93,7 +101,7 @@ namespace X86ISA
 
         TlbEntryTrie::Handle trieHandle;
 
-        TlbEntry(Addr asn, Addr _vaddr, Addr _paddr,
+        TlbEntry(Addr asn, Addr _vaddr, Addr _paddr, unsigned _coalLength, unsigned _pcid,
                  bool uncacheable, bool read_only);
         TlbEntry();
 
@@ -109,9 +117,41 @@ namespace X86ISA
         }
 
         // Return the page size in bytes
-        int size()
+        Addr size()
         {
-            return (1 << logBytes);
+            return (1ULL << logBytes);
+        }
+
+        bool
+        isCoalesced()
+        {
+            return coalLength > 1;
+        }
+
+        Addr
+        endVaddr()
+        {
+            return vaddr + coalLength * size();
+        }
+
+        bool
+        contains(Addr va, unsigned req_pcid)
+        {
+            Addr page_vaddr = va & ~(size() - 1);
+
+            return valid &&
+                page_vaddr >= vaddr &&
+                page_vaddr < endVaddr() &&
+                (global || pcid == req_pcid);
+        }
+
+        Addr
+        pAddr(Addr va)
+        {
+            Addr page_offset = va & (size() - 1);
+            Addr page_index = ((va & ~(size() - 1)) - vaddr) >> logBytes;
+
+            return paddr + (page_index << logBytes) + page_offset;
         }
 
         void serialize(CheckpointOut &cp) const override;

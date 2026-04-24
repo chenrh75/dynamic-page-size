@@ -98,6 +98,8 @@ namespace X86ISA
         void demapPage(Addr va, uint64_t asn) override;
 
       protected:
+        bool coltFA;
+
         uint32_t size;
 
         std::vector<TlbEntry> tlb;
@@ -107,7 +109,18 @@ namespace X86ISA
         TlbEntryTrie trie;
         uint64_t lruSeq;
 
+        uint32_t maxCoalescedEntries;
+
         AddrRange m5opRange;
+
+        TlbEntry *lookupCoalesced(Addr va, uint64_t pcid,
+                          bool update_lru = true);
+
+        bool canCoalesce(TlbEntry *a, TlbEntry *b);
+
+        void tryCoalesce(TlbEntry *entry);
+
+        void invalidateEntry(TlbEntry *entry);
 
         struct TlbStats : public statistics::Group
         {

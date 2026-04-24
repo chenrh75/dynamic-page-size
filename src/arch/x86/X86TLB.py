@@ -61,3 +61,8 @@ class X86TLB(BaseTLB):
     walker = Param.X86PagetableWalker(
         X86PagetableWalker(), "page table walker"
     )
+    colt_fa = Param.Bool(
+        False,
+        "Whether to use a fully associative structure for coalescing TLB entries",
+    )
+    max_coalesced_entries = Param.Unsigned(8, "Maximum number of entries that can be coalesced into a single TLB entry")
