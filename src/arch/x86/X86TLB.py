@@ -65,4 +65,7 @@ class X86TLB(BaseTLB):
         False,
         "Whether to use a fully associative structure for coalescing TLB entries",
     )
-    max_coalesced_entries = Param.Unsigned(8, "Maximum number of entries that can be coalesced into a single TLB entry")
+    max_coalesced_entries = Param.Unsigned(
+        8,
+        "Maximum number of entries that can be coalesced into a single TLB entry",
+    )

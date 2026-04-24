@@ -98,9 +98,9 @@ namespace X86ISA
         void demapPage(Addr va, uint64_t asn) override;
 
       protected:
-        bool coltFA;
-
         uint32_t size;
+
+        bool coltFA;
 
         std::vector<TlbEntry> tlb;
 

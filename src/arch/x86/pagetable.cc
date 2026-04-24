@@ -49,7 +49,7 @@ namespace X86ISA
 {
 
 TlbEntry::TlbEntry()
-    : paddr(0), vaddr(0), coalLength(1), pcid(0), valid(false), logBytes(0), 
+    : paddr(0), vaddr(0), coalLength(1), pcid(0), valid(false), logBytes(0),
       writable(0), user(true), uncacheable(0), global(false), patBit(0),
       noExec(false), lruSeq(0)
 {
@@ -57,7 +57,7 @@ TlbEntry::TlbEntry()
 
 TlbEntry::TlbEntry(Addr asn, Addr _vaddr, Addr _paddr, unsigned _coalLength, unsigned _pcid,
                    bool uncacheable, bool read_only) :
-    paddr(_paddr), vaddr(_vaddr), coalLength(_coalLength), pcid(_pcid), valid(true), logBytes(PageShift), 
+    paddr(_paddr), vaddr(_vaddr), coalLength(_coalLength), pcid(_pcid), valid(true), logBytes(PageShift),
     writable(!read_only), user(true), uncacheable(uncacheable), global(false), patBit(0),
     noExec(false), lruSeq(0)
 {}

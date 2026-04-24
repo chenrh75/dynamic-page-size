@@ -278,7 +278,6 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
     // If somebody beat us to it, just use that existing entry.
     TlbEntry *newEntry = trie.lookup(trie_vpn);
     if (newEntry) {
-        assert(newEntry->vaddr == raw_vpn); // is it true?
         return newEntry;
     }
 
@@ -346,7 +345,7 @@ TLB::flushNonGlobal()
 {
     DPRINTF(TLB, "Invalidating all non global entries.\n");
     for (unsigned i = 0; i < size; i++) {
-        if (tlb[i].trieHandle && !tlb[i].global) {
+        if (tlb[i].valid && !tlb[i].global) {
             invalidateEntry(&tlb[i]);
         }
     }
@@ -371,7 +370,7 @@ TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
             const Addr entry_end =
                 entry.vaddr + entry.coalLength * page_size;
 
-            if (raw_va >= entry_begin && raw_va < entry_end) {
+            if (entry.contains(raw_va, pcid)) {
                 invalidateEntry(&entry);
                 return;
             }
@@ -379,7 +378,7 @@ TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
     }
 
     const Addr trie_va = concAddrPcid(raw_va, pcid);
-    TlbEntry *entry = trie.lookup(va);
+    TlbEntry *entry = trie.lookup(trie_va);
     if (entry) {
         invalidateEntry(entry);
     }
@@ -871,7 +870,8 @@ TLB::unserialize(CheckpointIn &cp)
         freeList.pop_front();
 
         newEntry->unserializeSection(cp, csprintf("Entry%d", x));
-        newEntry->trieHandle = trie.insert(newEntry->vaddr,
+        const Addr trie_vpn = concAddrPcid(newEntry->vaddr, newEntry->pcid);
+        newEntry->trieHandle = trie.insert(trie_vpn,
             TlbEntryTrie::MaxBits - newEntry->logBytes, newEntry);
     }
 }
