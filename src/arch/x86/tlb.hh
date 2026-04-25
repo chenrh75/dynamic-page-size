@@ -123,7 +123,7 @@ namespace X86ISA
         void invalidateEntry(TlbEntry *entry);
 
         void insertSplitEntry(const TlbEntry &entry);
-        
+
         struct TlbStats : public statistics::Group
         {
             TlbStats(statistics::Group *parent);
@@ -137,9 +137,6 @@ namespace X86ISA
             statistics::Scalar coalescedrdAccesses;
             statistics::Scalar coalescedwrAccesses;
             statistics::Scalar coalescedexAccesses;
-            statistics::Scalar coalescedrdMisses;
-            statistics::Scalar coalescedwrMisses;
-            statistics::Scalar coalescedexMisses;
             statistics::Scalar coalesceCount;
         } stats;
 
