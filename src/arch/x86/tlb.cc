@@ -251,7 +251,7 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
             candidate.coalLength = 1;
             freeList.push_back(&candidate);
             
-            unsigned length_shift = floorLog2(entry->coalLength);
+            // unsigned length_shift = floorLog2(entry->coalLength);
 
             const Addr trie_vpn = concAddrPcid(entry->vaddr, entry->pcid);
 
@@ -266,7 +266,7 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
                 // SE Mode
                 entry->trieHandle = trie.insert(
                     trie_vpn,
-                    TlbEntryTrie::MaxBits - length_shift,
+                    TlbEntryTrie::MaxBits, // don't change trie insertion
                     entry);
             }
 
@@ -644,20 +644,22 @@ TLB::translate(const RequestPtr &req,
             if (!entry)
                 entry = lookup(triePageAlignedVaddr);
 
+            const bool coalesced_hit = entry && entry->isCoalesced(); 
+
             switch (mode) {
                 case BaseMMU::Read:
                     stats.rdAccesses++;
-                    if (entry->coalLength > 1)
+                    if (coalesced_hit)
                         stats.coalescedrdAccesses++;
                     break;
                 case BaseMMU::Write:
                     stats.wrAccesses++;
-                    if (entry->coalLength > 1)
+                    if (coalesced_hit)
                         stats.coalescedwrAccesses++;
                     break;
                 case BaseMMU::Execute:
                     stats.exAccesses++;
-                    if (entry->coalLength > 1)
+                    if (coalesced_hit)
                         stats.coalescedexAccesses++;
                     break;
                 default:
@@ -671,18 +673,12 @@ TLB::translate(const RequestPtr &req,
                 switch (mode) {
                     case BaseMMU::Read:
                         stats.rdMisses++;
-                        if (entry->coalLength > 1)
-                            stats.coalescedrdMisses++;
                         break;
                     case BaseMMU::Write:
                         stats.wrMisses++;
-                        if (entry->coalLength > 1)
-                            stats.coalescedwrMisses++;
                         break;
                     case BaseMMU::Execute:
                         stats.exMisses++;
-                        if (entry->coalLength > 1)
-                            stats.coalescedexMisses++;
                         break;
                     default:
                         panic("Invalid mode\n");
@@ -864,12 +860,6 @@ TLB::TlbStats::TlbStats(statistics::Group *parent)
                "Coalesced TLB accesses on write requests"),
       ADD_STAT(coalescedexAccesses, statistics::units::Count::get(),
                "Coalesced TLB accesses on execute (instr) requests"),
-      ADD_STAT(coalescedrdMisses, statistics::units::Count::get(),
-               "Coalesced TLB misses on read requests"),
-      ADD_STAT(coalescedwrMisses, statistics::units::Count::get(),
-               "Coalesced TLB misses on write requests"),
-      ADD_STAT(coalescedexMisses, statistics::units::Count::get(),
-               "Coalesced TLB misses on execute (instr) requests"),
       ADD_STAT(coalesceCount, statistics::units::Count::get(),
                "Number of times entries were coalesced")
 {
