@@ -174,6 +174,12 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
         return false;
     }
 
+    if (!FullSystem) {
+        // Realistic OS only has a fraction of pages that are contiguous
+        if (rand() % 100 > 30)
+            return false;
+    }
+
     return true;
 }
 
@@ -244,18 +250,23 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
             candidate.valid = false;
             candidate.coalLength = 1;
             freeList.push_back(&candidate);
+            
+            unsigned length_shift = floorLog2(entry->coalLength);
 
             const Addr trie_vpn = concAddrPcid(entry->vaddr, entry->pcid);
+
+            stats.coalesceCount++;
 
             if (FullSystem) {
                 entry->trieHandle = trie.insert(
                     trie_vpn,
                     TlbEntryTrie::MaxBits - entry->logBytes,
                     entry);
-            } else {
+            } else { 
+                // SE Mode
                 entry->trieHandle = trie.insert(
                     trie_vpn,
-                    TlbEntryTrie::MaxBits,
+                    TlbEntryTrie::MaxBits - length_shift,
                     entry);
             }
 
@@ -636,12 +647,18 @@ TLB::translate(const RequestPtr &req,
             switch (mode) {
                 case BaseMMU::Read:
                     stats.rdAccesses++;
+                    if (entry->coalLength > 1)
+                        stats.coalescedrdAccesses++;
                     break;
                 case BaseMMU::Write:
                     stats.wrAccesses++;
+                    if (entry->coalLength > 1)
+                        stats.coalescedwrAccesses++;
                     break;
                 case BaseMMU::Execute:
                     stats.exAccesses++;
+                    if (entry->coalLength > 1)
+                        stats.coalescedexAccesses++;
                     break;
                 default:
                     panic("Invalid mode\n");
@@ -654,12 +671,18 @@ TLB::translate(const RequestPtr &req,
                 switch (mode) {
                     case BaseMMU::Read:
                         stats.rdMisses++;
+                        if (entry->coalLength > 1)
+                            stats.coalescedrdMisses++;
                         break;
                     case BaseMMU::Write:
                         stats.wrMisses++;
+                        if (entry->coalLength > 1)
+                            stats.coalescedwrMisses++;
                         break;
                     case BaseMMU::Execute:
                         stats.exMisses++;
+                        if (entry->coalLength > 1)
+                            stats.coalescedexMisses++;
                         break;
                     default:
                         panic("Invalid mode\n");
@@ -834,7 +857,21 @@ TLB::TlbStats::TlbStats(statistics::Group *parent)
       ADD_STAT(wrMisses, statistics::units::Count::get(),
                "TLB misses on write requests"),
       ADD_STAT(exMisses, statistics::units::Count::get(),
-               "TLB misses on execute (instr) requests")
+               "TLB misses on execute (instr) requests"),
+      ADD_STAT(coalescedrdAccesses, statistics::units::Count::get(),
+               "Coalesced TLB accesses on read requests"),
+      ADD_STAT(coalescedwrAccesses, statistics::units::Count::get(),
+               "Coalesced TLB accesses on write requests"),
+      ADD_STAT(coalescedexAccesses, statistics::units::Count::get(),
+               "Coalesced TLB accesses on execute (instr) requests"),
+      ADD_STAT(coalescedrdMisses, statistics::units::Count::get(),
+               "Coalesced TLB misses on read requests"),
+      ADD_STAT(coalescedwrMisses, statistics::units::Count::get(),
+               "Coalesced TLB misses on write requests"),
+      ADD_STAT(coalescedexMisses, statistics::units::Count::get(),
+               "Coalesced TLB misses on execute (instr) requests"),
+      ADD_STAT(coalesceCount, statistics::units::Count::get(),
+               "Number of times entries were coalesced")
 {
 }
 
