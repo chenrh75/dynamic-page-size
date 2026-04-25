@@ -154,9 +154,59 @@ namespace X86ISA
             return paddr + (page_index << logBytes) + page_offset;
         }
 
+        bool
+        splitOnInvalidate(Addr va, unsigned req_pcid,
+                        TlbEntry &entry_one,
+                        TlbEntry &entry_two)
+        {
+            entry_one.valid = false;
+            entry_one.coalLength = 0;
+            entry_one.trieHandle = NULL;
+
+            entry_two.valid = false;
+            entry_two.coalLength = 0;
+            entry_two.trieHandle = NULL;
+
+            if (!valid || coalLength <= 1)
+                return false;
+
+            if (!contains(va, req_pcid))
+                return false;
+
+            const Addr page_size = size();
+            const Addr raw_va = va & ~(page_size - 1);
+
+            const unsigned invalid_index = (raw_va - vaddr) >> logBytes;
+
+            if (invalid_index >= coalLength)
+                return false;
+
+            const unsigned left_len = invalid_index;
+            const unsigned right_len = coalLength - invalid_index - 1;
+
+            if (left_len > 0) {
+                entry_one = *this;
+                entry_one.coalLength = left_len;
+                entry_one.valid = true;
+                entry_one.trieHandle = NULL;
+            }
+
+            if (right_len > 0) {
+                entry_two = *this;
+                entry_two.vaddr = vaddr + (invalid_index + 1) * page_size;
+                entry_two.paddr = paddr + (invalid_index + 1) * page_size;
+                entry_two.coalLength = right_len;
+                entry_two.valid = true;
+                entry_two.trieHandle = NULL;
+            }
+
+            return true;
+        }
+
         void serialize(CheckpointOut &cp) const override;
         void unserialize(CheckpointIn &cp) override;
     };
+
 
 
     BitUnion64(VAddr)

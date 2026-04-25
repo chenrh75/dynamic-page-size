@@ -363,7 +363,76 @@ TLB::flushNonGlobal()
 }
 
 void
-TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
+TLB::insertSplitEntry(const TlbEntry &entry)
+{
+    if (!entry.valid || entry.coalLength == 0)
+        return;
+
+    if (freeList.empty())
+        evictLRU();
+
+    TlbEntry *newEntry = freeList.front();
+    freeList.pop_front();
+
+    *newEntry = entry;
+    newEntry->valid = true;
+    newEntry->trieHandle = NULL;
+    newEntry->lruSeq = nextSeq();
+
+    const Addr trie_vpn = concAddrPcid(newEntry->vaddr, newEntry->pcid);
+
+    if (FullSystem) {
+        newEntry->trieHandle = trie.insert(
+            trie_vpn,
+            TlbEntryTrie::MaxBits - newEntry->logBytes,
+            newEntry);
+    } else {
+        newEntry->trieHandle = trie.insert(
+            trie_vpn,
+            TlbEntryTrie::MaxBits,
+            newEntry);
+    }
+    DPRINTF(TLB,
+    "DeCoalesce insert survivor: baseVA=%#lx basePA=%#lx len=%u pcid=%u\n",
+    newEntry->vaddr, newEntry->paddr,
+    newEntry->coalLength, newEntry->pcid);
+}
+
+// void
+// TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
+// {
+//     const Addr raw_va = va & ~mask(X86ISA::PageShift);
+//     const uint64_t pcid = asn & mask(X86ISA::PageShift);
+
+//     if (coltFA) {
+//         for (auto &entry : tlb) {
+//             if (!entry.valid || !entry.isCoalesced())
+//                 continue;
+
+//             // Conservative: if the raw VA is covered, invalidate the whole
+//             // coalesced entry. This may over-invalidate across PCIDs, but it
+//             // will not keep stale translations.
+//             const Addr page_size = entry.size();
+//             const Addr entry_begin = entry.vaddr;
+//             const Addr entry_end =
+//                 entry.vaddr + entry.coalLength * page_size;
+
+//             if (entry.contains(raw_va, pcid)) {
+//                 invalidateEntry(&entry);
+//                 return;
+//             }
+//         }
+//     }
+
+//     const Addr trie_va = concAddrPcid(raw_va, pcid);
+//     TlbEntry *entry = trie.lookup(trie_va);
+//     if (entry) {
+//         invalidateEntry(entry);
+//     }
+// }
+
+void
+TLB::demapPage(Addr va, uint64_t asn)
 {
     const Addr raw_va = va & ~mask(X86ISA::PageShift);
     const uint64_t pcid = asn & mask(X86ISA::PageShift);
@@ -373,23 +442,41 @@ TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
             if (!entry.valid || !entry.isCoalesced())
                 continue;
 
-            // Conservative: if the raw VA is covered, invalidate the whole
-            // coalesced entry. This may over-invalidate across PCIDs, but it
-            // will not keep stale translations.
-            const Addr page_size = entry.size();
-            const Addr entry_begin = entry.vaddr;
-            const Addr entry_end =
-                entry.vaddr + entry.coalLength * page_size;
+            if (!entry.contains(raw_va, pcid))
+                continue;
 
-            if (entry.contains(raw_va, pcid)) {
+            TlbEntry entry_one;
+            TlbEntry entry_two;
+
+            if (entry.splitOnInvalidate(raw_va, pcid,
+                                        entry_one, entry_two)) {
+                DPRINTF(TLB,
+                    "DeCoalesce split: invalidate va=%#lx from "
+                    "baseVA=%#lx basePA=%#lx len=%u -> "
+                    "left(baseVA=%#lx len=%u valid=%d), "
+                    "right(baseVA=%#lx len=%u valid=%d)\n",
+                    raw_va, entry.vaddr, entry.paddr, entry.coalLength,
+                    entry_one.vaddr, entry_one.coalLength, entry_one.valid,
+                    entry_two.vaddr, entry_two.coalLength, entry_two.valid);
+
                 invalidateEntry(&entry);
+
+                insertSplitEntry(entry_one);
+                insertSplitEntry(entry_two);
+
                 return;
             }
+
+            // Fallback: should rarely happen if contains() was true.
+            invalidateEntry(&entry);
+            return;
         }
     }
 
     const Addr trie_va = concAddrPcid(raw_va, pcid);
+
     TlbEntry *entry = trie.lookup(trie_va);
+
     if (entry) {
         invalidateEntry(entry);
     }

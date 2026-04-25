@@ -122,6 +122,8 @@ namespace X86ISA
 
         void invalidateEntry(TlbEntry *entry);
 
+        void insertSplitEntry(const TlbEntry &entry);
+        
         struct TlbStats : public statistics::Group
         {
             TlbStats(statistics::Group *parent);
