@@ -176,11 +176,12 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
         return false;
     }
 
-    if (!FullSystem) {
-        // Realistic OS only has a fraction of pages that are contiguous
-        if (rand() % 100 > 30)
-            return false;
-    }
+    // ChatGPT says we can't do it because we may fail to re-enable a valid bit
+    // if (!FullSystem) {
+    //     // Realistic OS only has a fraction of pages that are contiguous
+    //     if (rand() % 100 > 30)
+    //         return false;
+    // }
 
     return true;
 }
@@ -427,6 +428,8 @@ TLB::tryCoalesce(TlbEntry *entry)
                     entry);
             }
 
+            stats.coalesceCount++;
+
             changed = true;
             break;
         }
@@ -448,6 +451,16 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
     // If somebody beat us to it, just use that existing entry.
     TlbEntry *newEntry = trie.lookup(trie_vpn);
     if (newEntry) {
+        if (coltFA && newEntry->isCoalesced()) {
+            const bool covered =
+                newEntry->subentryIndex(raw_vpn) >= 0 &&
+                newEntry->pcid == pcid;
+
+            if (covered) {
+                newEntry->validateSubentry(raw_vpn, pcid);
+                newEntry->lruSeq = nextSeq();
+            }
+        }
         return newEntry;
     }
 
@@ -507,6 +520,7 @@ TLB::flushAll()
         }
         tlb[i].valid = false;
         tlb[i].coalLength = 1;
+        tlb[i].validSubentries = 0;
         freeList.push_back(&tlb[i]);
     }
 }
@@ -871,9 +885,13 @@ TLB::translate(const RequestPtr &req,
                         return fault;
                     }
                     entry = lookupCoalesced(vaddr, pcid);
-                    if (!entry)
-                        entry = lookup(triePageAlignedVaddr);
-
+                    if (!entry) {
+                        entry = lookup(triePageAlignedVaddr, false);
+                        if (entry && entry->isCoalesced() && !entry->contains(vaddr, pcid))
+                            entry = nullptr;
+                        if (entry)
+                            entry->lruSeq = nextSeq();
+                    }
                     assert(entry);
                 } else {
                     Process *p = tc->getProcessPtr();

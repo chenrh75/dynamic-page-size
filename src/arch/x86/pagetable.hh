@@ -194,19 +194,13 @@ namespace X86ISA
                 subentryValid(va);
         }
 
-        bool
-        contains(Addr va, unsigned req_pcid)
-        {
-            return valid &&
-                (global || pcid == req_pcid) &&
-                subentryValid(va);
-        }
-
         Addr
         pAddr(Addr va)
         {
             Addr page_offset = va & (size() - 1);
             Addr page_index = ((va & ~(size() - 1)) - vaddr) >> logBytes;
+
+            assert(subentryValid(va));
 
             return paddr + (page_index << logBytes) + page_offset;
         }
@@ -233,6 +227,24 @@ namespace X86ISA
             validSubentries &= ~bit;
             valid = hasValidSubentries();
 
+            return true;
+        }
+
+        bool
+        validateSubentry(Addr va, unsigned req_pcid)
+        {
+            if (!valid || coalLength == 0)
+                return false;
+
+            if (!(global || pcid == req_pcid))
+                return false;
+
+            const int index = subentryIndex(va);
+            if (index < 0)
+                return false;
+
+            validSubentries |= (1ULL << index);
+            valid = true;
             return true;
         }
 

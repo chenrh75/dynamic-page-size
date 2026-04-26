@@ -102,14 +102,13 @@ namespace X86ISA
 
         bool coltFA;
 
+        uint32_t maxCoalescedEntries;
         std::vector<TlbEntry> tlb;
 
         EntryList freeList;
 
         TlbEntryTrie trie;
         uint64_t lruSeq;
-
-        uint32_t maxCoalescedEntries;
 
         AddrRange m5opRange;
 
