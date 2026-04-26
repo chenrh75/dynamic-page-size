@@ -118,7 +118,7 @@ namespace X86ISA
 
         bool canCoalesce(TlbEntry *a, TlbEntry *b);
 
-        void tryCoalesce(TlbEntry *entry);
+        TlbEntry *tryCoalesce(TlbEntry *entry);
 
         void invalidateEntry(TlbEntry *entry);
 

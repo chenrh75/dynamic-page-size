@@ -74,6 +74,7 @@ TLB::TLB(const Params &p)
         tlb[x].trieHandle = NULL;
         tlb[x].valid = false;
         tlb[x].coalLength = 1;
+        tlb[x].validSubentries = 0;
         freeList.push_back(&tlb[x]);
     }
 
@@ -97,6 +98,7 @@ TLB::invalidateEntry(TlbEntry *entry)
 
     entry->valid = false;
     entry->coalLength = 1;
+    entry->validSubentries = 0;
 
     freeList.push_back(entry);
 }
@@ -183,12 +185,157 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
     return true;
 }
 
-void
-TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent entries if possible
+// void
+// TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent entries if possible
+// {
+//     if (!coltFA || !entry || !entry->valid)
+//         return;
+
+//     bool changed = true;
+
+//     while (changed) {
+//         changed = false;
+
+//         for (auto &candidate : tlb) {
+//             if (!canCoalesce(entry, &candidate))
+//                 continue;
+
+//             const Addr page_size = entry->size();
+
+//             const Addr entry_vend =
+//                 entry->vaddr + entry->coalLength * page_size;
+//             const Addr entry_pend =
+//                 entry->paddr + entry->coalLength * page_size;
+
+//             const Addr cand_vend =
+//                 candidate.vaddr + candidate.coalLength * page_size;
+//             const Addr cand_pend =
+//                 candidate.paddr + candidate.coalLength * page_size;
+
+//             const bool append =
+//                 entry_vend == candidate.vaddr &&
+//                 entry_pend == candidate.paddr;
+
+//             const bool prepend =
+//                 cand_vend == entry->vaddr &&
+//                 cand_pend == entry->paddr;
+
+//             if (!append && !prepend)
+//                 continue;
+
+//             const unsigned new_len =
+//                 entry->coalLength + candidate.coalLength;
+
+//             if (new_len > maxCoalescedEntries)
+//                 continue;
+
+//             // Remove old trie mappings. The coalesced entry will get a new
+//             // trie mapping at its new base address.
+//             if (entry->trieHandle) {
+//                 trie.remove(entry->trieHandle);
+//                 entry->trieHandle = NULL;
+//             }
+
+//             if (candidate.trieHandle) {
+//                 trie.remove(candidate.trieHandle);
+//                 candidate.trieHandle = NULL;
+//             }
+
+//             if (prepend) {
+//                 entry->vaddr = candidate.vaddr;
+//                 entry->paddr = candidate.paddr;
+//             }
+
+//             entry->coalLength = new_len;
+//             entry->lruSeq = nextSeq();
+
+//             candidate.valid = false;
+//             candidate.coalLength = 1;
+//             freeList.push_back(&candidate);
+            
+//             // unsigned length_shift = floorLog2(entry->coalLength);
+
+//             const Addr trie_vpn = concAddrPcid(entry->vaddr, entry->pcid);
+
+//             stats.coalesceCount++;
+
+//             if (FullSystem) {
+//                 entry->trieHandle = trie.insert(
+//                     trie_vpn,
+//                     TlbEntryTrie::MaxBits - entry->logBytes,
+//                     entry);
+//             } else { 
+//                 // SE Mode
+//                 entry->trieHandle = trie.insert(
+//                     trie_vpn,
+//                     TlbEntryTrie::MaxBits, // don't change trie insertion
+//                     entry);
+//             }
+
+//             changed = true;
+//             break;
+//         }
+//     }
+// }
+
+TlbEntry *
+TLB::tryCoalesce(TlbEntry *entry)
 {
     if (!coltFA || !entry || !entry->valid)
-        return;
+        return entry;
 
+    if (maxCoalescedEntries <= 1)
+        return entry;
+
+    entry->coalLength = std::max(1u, entry->coalLength);
+
+    if (entry->validSubentries == 0)
+        entry->validSubentries = TlbEntry::spanMask(entry->coalLength);
+
+    /*
+     * Case 1:
+     * The new entry falls inside an existing coalesced entry.
+     * This can happen after a base page was invalidated by clearing
+     * a valid bit, then later refilled.
+     */
+    for (auto &candidate : tlb) {
+        if (!canCoalesce(entry, &candidate))
+            continue;
+
+        const Addr page_size = entry->size();
+
+        const bool va_inside =
+            candidate.vaddr <= entry->vaddr &&
+            entry->vaddr < candidate.vaddr +
+                           candidate.coalLength * page_size;
+
+        const bool pa_matches =
+            candidate.paddr + (entry->vaddr - candidate.vaddr) ==
+            entry->paddr;
+
+        if (va_inside && pa_matches) {
+            const unsigned index =
+                (entry->vaddr - candidate.vaddr) >> entry->logBytes;
+
+            candidate.validSubentries |= 1ULL << index;
+            candidate.valid = candidate.hasValidSubentries();
+            candidate.lruSeq = nextSeq();
+
+            /*
+             * The newly inserted entry is redundant. Free that slot.
+             * Return the existing coalesced entry because insert()
+             * may use the returned pointer.
+             */
+            invalidateEntry(entry);
+
+            return &candidate;
+        }
+    }
+
+    /*
+     * Case 2:
+     * Merge adjacent resident entries and combine their valid masks.
+     */
     bool changed = true;
 
     while (changed) {
@@ -221,14 +368,27 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
             if (!append && !prepend)
                 continue;
 
+            const Addr new_base_vaddr = std::min(entry->vaddr,
+                                                 candidate.vaddr);
+            const Addr new_base_paddr = std::min(entry->paddr,
+                                                 candidate.paddr);
+
             const unsigned new_len =
-                entry->coalLength + candidate.coalLength;
+                (std::max(entry_vend, cand_vend) - new_base_vaddr)
+                >> entry->logBytes;
 
             if (new_len > maxCoalescedEntries)
                 continue;
 
-            // Remove old trie mappings. The coalesced entry will get a new
-            // trie mapping at its new base address.
+            const unsigned entry_shift =
+                (entry->vaddr - new_base_vaddr) >> entry->logBytes;
+            const unsigned cand_shift =
+                (candidate.vaddr - new_base_vaddr) >> entry->logBytes;
+
+            const uint64_t merged_mask =
+                (entry->validMask() << entry_shift) |
+                (candidate.validMask() << cand_shift);
+
             if (entry->trieHandle) {
                 trie.remove(entry->trieHandle);
                 entry->trieHandle = NULL;
@@ -239,34 +399,31 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
                 candidate.trieHandle = NULL;
             }
 
-            if (prepend) {
-                entry->vaddr = candidate.vaddr;
-                entry->paddr = candidate.paddr;
-            }
-
+            entry->vaddr = new_base_vaddr;
+            entry->paddr = new_base_paddr;
             entry->coalLength = new_len;
+            entry->validSubentries = merged_mask;
+            entry->valid = entry->hasValidSubentries();
             entry->lruSeq = nextSeq();
 
             candidate.valid = false;
             candidate.coalLength = 1;
+            candidate.validSubentries = 0;
+
             freeList.push_back(&candidate);
-            
-            // unsigned length_shift = floorLog2(entry->coalLength);
 
-            const Addr trie_vpn = concAddrPcid(entry->vaddr, entry->pcid);
-
-            stats.coalesceCount++;
+            const Addr trie_vpn = concAddrPcid(entry->vaddr,
+                                               entry->pcid);
 
             if (FullSystem) {
                 entry->trieHandle = trie.insert(
                     trie_vpn,
                     TlbEntryTrie::MaxBits - entry->logBytes,
                     entry);
-            } else { 
-                // SE Mode
+            } else {
                 entry->trieHandle = trie.insert(
                     trie_vpn,
-                    TlbEntryTrie::MaxBits, // don't change trie insertion
+                    TlbEntryTrie::MaxBits,
                     entry);
             }
 
@@ -274,6 +431,8 @@ TLB::tryCoalesce(TlbEntry *entry) // merge newly inserted entry with adjacent en
             break;
         }
     }
+
+    return entry;
 }
 
 TlbEntry *
@@ -304,6 +463,12 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
     newEntry->pcid = pcid;
     newEntry->valid = true;
 
+    if (newEntry->coalLength == 0)
+        newEntry->coalLength = 1;
+
+    if (newEntry->validSubentries == 0)
+        newEntry->validSubentries = TlbEntry::spanMask(newEntry->coalLength);
+
     if (FullSystem) {
         newEntry->trieHandle =
         trie.insert(trie_vpn, TlbEntryTrie::MaxBits-entry.logBytes, newEntry);
@@ -313,7 +478,8 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
         trie.insert(trie_vpn, TlbEntryTrie::MaxBits, newEntry);
     }
 
-    tryCoalesce(newEntry);
+    if (coltFA)
+        newEntry = tryCoalesce(newEntry);
 
     return newEntry;
 }
@@ -363,7 +529,7 @@ TLB::flushNonGlobal()
 }
 
 void
-TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
+TLB::demapPage(Addr va, uint64_t asn)
 {
     const Addr raw_va = va & ~mask(X86ISA::PageShift);
     const uint64_t pcid = asn & mask(X86ISA::PageShift);
@@ -373,16 +539,17 @@ TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
             if (!entry.valid || !entry.isCoalesced())
                 continue;
 
-            // Conservative: if the raw VA is covered, invalidate the whole
-            // coalesced entry. This may over-invalidate across PCIDs, but it
-            // will not keep stale translations.
-            const Addr page_size = entry.size();
-            const Addr entry_begin = entry.vaddr;
-            const Addr entry_end =
-                entry.vaddr + entry.coalLength * page_size;
+            if (entry.invalidateSubentry(raw_va, pcid)) {
+                DPRINTF(TLB,
+                    "DeCoLT valid-bit invalidate: va=%#lx "
+                    "baseVA=%#lx basePA=%#lx len=%u mask=%#llx\n",
+                    raw_va, entry.vaddr, entry.paddr,
+                    entry.coalLength,
+                    static_cast<unsigned long long>(entry.validMask()));
 
-            if (entry.contains(raw_va, pcid)) {
-                invalidateEntry(&entry);
+                if (!entry.valid)
+                    invalidateEntry(&entry);
+
                 return;
             }
         }
@@ -390,8 +557,14 @@ TLB::demapPage(Addr va, uint64_t asn) // TODO: decoalesce
 
     const Addr trie_va = concAddrPcid(raw_va, pcid);
     TlbEntry *entry = trie.lookup(trie_va);
+
     if (entry) {
-        invalidateEntry(entry);
+        if (entry->isCoalesced()) {
+            if (entry->invalidateSubentry(raw_va, pcid) && !entry->valid)
+                invalidateEntry(entry);
+        } else {
+            invalidateEntry(entry);
+        }
     }
 }
 
@@ -641,8 +814,14 @@ TLB::translate(const RequestPtr &req,
             Addr triePageAlignedVaddr = concAddrPcid(rawPageAlignedVaddr, pcid);
 
             TlbEntry *entry = lookupCoalesced(vaddr, pcid);
-            if (!entry)
+            if (!entry) {
                 entry = lookup(triePageAlignedVaddr);
+                if (entry && entry->isCoalesced() && !entry->contains(vaddr, pcid))
+                    entry = nullptr;
+
+                if (entry)
+                    entry->lruSeq = nextSeq();
+            }
 
             const bool coalesced_hit = entry && entry->isCoalesced(); 
 

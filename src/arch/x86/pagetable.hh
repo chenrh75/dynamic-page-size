@@ -73,6 +73,8 @@ namespace X86ISA
         // The number of contiguous pages this entry maps, starting with the one
         unsigned coalLength;
 
+        uint64_t validSubentries;
+
         unsigned pcid;
 
         bool valid;
@@ -134,15 +136,70 @@ namespace X86ISA
             return vaddr + coalLength * size();
         }
 
+
+        static constexpr unsigned MaxCoalescedEntries = 64;
+
+        static uint64_t
+        spanMask(unsigned span)
+        {
+            if (span == 0)
+                return 0;
+
+            if (span >= MaxCoalescedEntries)
+                return ~0ULL;
+
+            return (1ULL << span) - 1;
+        }
+
+        uint64_t
+        validMask()
+        {
+            return validSubentries & spanMask(coalLength);
+        }
+
+        bool
+        hasValidSubentries()
+        {
+            return validMask() != 0;
+        }
+
+        int
+        subentryIndex(Addr va)
+        {
+            const Addr page_size = size();
+            const Addr page_vaddr = va & ~(page_size - 1);
+
+            if (page_vaddr < vaddr || page_vaddr >= endVaddr())
+                return -1;
+
+            return (page_vaddr - vaddr) >> logBytes;
+        }
+
+        bool
+        subentryValid(Addr va)
+        {
+            const int index = subentryIndex(va);
+
+            if (index < 0)
+                return false;
+
+            return validMask() & (1ULL << index);
+        }
+
         bool
         contains(Addr va, unsigned req_pcid)
         {
-            Addr page_vaddr = va & ~(size() - 1);
-
             return valid &&
-                page_vaddr >= vaddr &&
-                page_vaddr < endVaddr() &&
-                (global || pcid == req_pcid);
+                (global || pcid == req_pcid) &&
+                subentryValid(va);
+        }
+
+        bool
+        contains(Addr va, unsigned req_pcid)
+        {
+            return valid &&
+                (global || pcid == req_pcid) &&
+                subentryValid(va);
         }
 
         Addr
@@ -152,6 +209,31 @@ namespace X86ISA
             Addr page_index = ((va & ~(size() - 1)) - vaddr) >> logBytes;
 
             return paddr + (page_index << logBytes) + page_offset;
+        }
+
+        bool
+        invalidateSubentry(Addr va, unsigned req_pcid)
+        {
+            if (!valid || coalLength == 0)
+                return false;
+
+            if (!(global || pcid == req_pcid))
+                return false;
+
+            const int index = subentryIndex(va);
+
+            if (index < 0)
+                return false;
+
+            const uint64_t bit = 1ULL << index;
+
+            if (!(validMask() & bit))
+                return false;
+
+            validSubentries &= ~bit;
+            valid = hasValidSubentries();
+
+            return true;
         }
 
         void serialize(CheckpointOut &cp) const override;

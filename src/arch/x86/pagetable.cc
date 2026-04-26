@@ -49,18 +49,23 @@ namespace X86ISA
 {
 
 TlbEntry::TlbEntry()
-    : paddr(0), vaddr(0), coalLength(1), pcid(0), valid(false), logBytes(0),
-      writable(0), user(true), uncacheable(0), global(false), patBit(0),
+    : paddr(0), vaddr(0), coalLength(1), validSubentries(0),
+      pcid(0), valid(false), logBytes(0), writable(0),
+      user(true), uncacheable(0), global(false), patBit(0),
       noExec(false), lruSeq(0)
 {
 }
 
-TlbEntry::TlbEntry(Addr asn, Addr _vaddr, Addr _paddr, unsigned _coalLength, unsigned _pcid,
-                   bool uncacheable, bool read_only) :
-    paddr(_paddr), vaddr(_vaddr), coalLength(_coalLength), pcid(_pcid), valid(true), logBytes(PageShift),
-    writable(!read_only), user(true), uncacheable(uncacheable), global(false), patBit(0),
-    noExec(false), lruSeq(0)
-{}
+TlbEntry::TlbEntry(Addr asn, Addr _vaddr, Addr _paddr,
+                   unsigned _coalLength, unsigned _pcid,
+                   bool uncacheable, bool read_only)
+    : paddr(_paddr), vaddr(_vaddr), coalLength(_coalLength),
+      validSubentries(TlbEntry::spanMask(_coalLength)),
+      pcid(_pcid), valid(true), logBytes(PageShift),
+      writable(!read_only), user(true), uncacheable(uncacheable),
+      global(false), patBit(0), noExec(false), lruSeq(0)
+{
+}
 
 void
 TlbEntry::serialize(CheckpointOut &cp) const
@@ -68,6 +73,7 @@ TlbEntry::serialize(CheckpointOut &cp) const
     SERIALIZE_SCALAR(paddr);
     SERIALIZE_SCALAR(vaddr);
     SERIALIZE_SCALAR(coalLength);
+    SERIALIZE_SCALAR(validSubentries);
     SERIALIZE_SCALAR(pcid);
     SERIALIZE_SCALAR(valid);
     SERIALIZE_SCALAR(logBytes);
@@ -86,6 +92,7 @@ TlbEntry::unserialize(CheckpointIn &cp)
     UNSERIALIZE_SCALAR(paddr);
     UNSERIALIZE_SCALAR(vaddr);
     UNSERIALIZE_SCALAR(coalLength);
+    UNSERIALIZE_SCALAR(validSubentries);
     UNSERIALIZE_SCALAR(pcid);
     UNSERIALIZE_SCALAR(valid);
     UNSERIALIZE_SCALAR(logBytes);
