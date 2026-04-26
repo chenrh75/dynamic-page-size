@@ -452,16 +452,39 @@ TLB::insert(Addr vpn, const TlbEntry &entry, uint64_t pcid)
     TlbEntry *newEntry = trie.lookup(trie_vpn);
     if (newEntry) {
         if (coltFA && newEntry->isCoalesced()) {
-            const bool covered =
-                newEntry->subentryIndex(raw_vpn) >= 0 &&
-                newEntry->pcid == pcid;
+            const int index = newEntry->subentryIndex(raw_vpn);
 
-            if (covered) {
-                newEntry->validateSubentry(raw_vpn, pcid);
-                newEntry->lruSeq = nextSeq();
+            if (index >= 0 && newEntry->pcid == pcid) {
+                const Addr expected_paddr =
+                    newEntry->paddr + (static_cast<Addr>(index) << newEntry->logBytes);
+
+                const bool same_translation =
+                    expected_paddr == entry.paddr;
+
+                const bool same_attrs =
+                    newEntry->logBytes == entry.logBytes &&
+                    newEntry->writable == entry.writable &&
+                    newEntry->user == entry.user &&
+                    newEntry->uncacheable == entry.uncacheable &&
+                    newEntry->global == entry.global &&
+                    newEntry->patBit == entry.patBit &&
+                    newEntry->noExec == entry.noExec;
+
+                if (same_translation && same_attrs) {
+                    newEntry->validateSubentry(raw_vpn, pcid);
+                    newEntry->lruSeq = nextSeq();
+                    return newEntry;
+                }
+
+                // Conservative fallback: the old coalesced entry is no longer
+                // valid as a single contiguous translation group.
+                invalidateEntry(newEntry);
+            } else {
+                return newEntry;
             }
+        } else {
+            return newEntry;
         }
-        return newEntry;
     }
 
     if (freeList.empty())
@@ -829,7 +852,7 @@ TLB::translate(const RequestPtr &req,
 
             TlbEntry *entry = lookupCoalesced(vaddr, pcid);
             if (!entry) {
-                entry = lookup(triePageAlignedVaddr);
+                entry = lookup(triePageAlignedVaddr, false);
                 if (entry && entry->isCoalesced() && !entry->contains(vaddr, pcid))
                     entry = nullptr;
 
