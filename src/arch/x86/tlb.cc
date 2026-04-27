@@ -144,7 +144,7 @@ TLB::lookupCoalesced(Addr va, uint64_t pcid, bool update_lru)
 }
 
 bool
-TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
+TLB::canShareEntry(TlbEntry *a, TlbEntry *b)
 {
     if (!a || !b)
         return false;
@@ -155,7 +155,7 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
     if (!a->valid || !b->valid)
         return false;
 
-    // TODO: only coalesce base 4 KB pages for now.
+    // Prototype CoLT: only coalesce base 4 KiB pages.
     if (a->logBytes != X86ISA::PageShift ||
         b->logBytes != X86ISA::PageShift) {
         return false;
@@ -164,9 +164,11 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
     if (a->logBytes != b->logBytes)
         return false;
 
+    // Conservative PCID rule. Keep it simple for now.
     if (a->pcid != b->pcid)
         return false;
 
+    // Coalesced entries must share the same translation attributes.
     if (a->writable != b->writable ||
         a->user != b->user ||
         a->uncacheable != b->uncacheable ||
@@ -176,12 +178,32 @@ TLB::canCoalesce(TlbEntry *a, TlbEntry *b)
         return false;
     }
 
-    // ChatGPT says we can't do it because we may fail to re-enable a valid bit
-    // if (!FullSystem) {
-    //     // Realistic OS only has a fraction of pages that are contiguous
-    //     if (rand() % 100 > 30)
-    //         return false;
-    // }
+    return true;
+}
+
+bool
+TLB::canNewCoalesce(TlbEntry *a, TlbEntry *b)
+{
+    if (!canShareEntry(a, b))
+        return false;
+
+    /*
+     * Optional policy knob:
+     *
+     * This is where you may reduce the probability of forming NEW
+     * coalesced entries to emulate less regular workloads.
+     *
+     * Do NOT put this random rejection in canShareEntry(), because
+     * canShareEntry() is also used for valid-bit refill/revalidation.
+     */
+
+#if 0
+    if (!FullSystem) {
+        // Allow only ~30% of otherwise valid new coalescing opportunities.
+        if (rand() % 100 > 30)
+            return false;
+    }
+#endif
 
     return true;
 }
@@ -300,7 +322,7 @@ TLB::tryCoalesce(TlbEntry *entry)
      * a valid bit, then later refilled.
      */
     for (auto &candidate : tlb) {
-        if (!canCoalesce(entry, &candidate))
+        if (!canShareEntry(entry, &candidate))
             continue;
 
         const Addr page_size = entry->size();
@@ -343,7 +365,7 @@ TLB::tryCoalesce(TlbEntry *entry)
         changed = false;
 
         for (auto &candidate : tlb) {
-            if (!canCoalesce(entry, &candidate))
+            if (!canNewCoalesce(entry, &candidate))
                 continue;
 
             const Addr page_size = entry->size();

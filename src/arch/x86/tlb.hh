@@ -115,7 +115,9 @@ namespace X86ISA
         TlbEntry *lookupCoalesced(Addr va, uint64_t pcid,
                           bool update_lru = true);
 
-        bool canCoalesce(TlbEntry *a, TlbEntry *b);
+        bool canShareEntry(TlbEntry *a, TlbEntry *b);
+
+        bool canNewCoalesce(TlbEntry *a, TlbEntry *b);
 
         TlbEntry *tryCoalesce(TlbEntry *entry);
 
